@@ -20,16 +20,16 @@ namespace DPGO {
  */
 struct RelativeSEMeasurement {
   /** 0-based index of first robot */
-  size_t r1;
+  unsigned r1;
 
   /** 0-based index of second robot */
-  size_t r2;
+  unsigned r2;
 
   /** 0-based index of first pose */
-  size_t p1;
+  unsigned p1;
 
   /** 0-based index of second pose */
-  size_t p2;
+  unsigned p2;
 
   /** Rotational measurement */
   Matrix R;

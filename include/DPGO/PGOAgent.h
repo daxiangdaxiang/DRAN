@@ -239,17 +239,23 @@ class PGOAgent {
   Reset this agent to have empty pose graph
   */
   virtual void reset();
-
+  
   /**
    * @brief Reset variables used in Nesterov acceleration
    */
   void initializeAcceleration();
 
   /**
+   * 
+   * @brief new_added, return neighbor poseids by order
+   * 
+   */
+  vector<PoseID> get_neighborid()const {return shared_neighbor;};
+  /**
   Return ID of this robot
   */
   inline unsigned getID() const { return mID; }
-
+  void fillsharedX(unsigned neighborID, const PoseDict &poseDict);
   /**
   Return number of poses of this robot
   */
@@ -309,7 +315,7 @@ class PGOAgent {
    */
   std::vector<unsigned> getNeighborPublicPoses(
       const unsigned &neighborID) const;
-
+  bool updateX_new(bool doOptimization, bool acceleration);
   /**
   Get vector of neighbor robot IDs.
   */
@@ -552,6 +558,7 @@ class PGOAgent {
 
   // Initial iterate
   std::optional<Matrix> XInit;
+  std::map<PoseID,Matrix> X_shared;
 
   // Initial solution TInit = [R1 t1 ... Rn tn] in an arbitrary coordinate frame
   std::optional<Matrix> TLocalInit;
@@ -574,10 +581,10 @@ class PGOAgent {
   // This dictionary stores poses owned by other robots that is connected to
   // this robot by loop closure
   PoseDict neighborPoseDict;
-
+  vector<PoseID> shared_neighbor;
   // Store the set of public poses that need to be sent to other robots
   set<PoseID> localSharedPoseIDs;
-
+  std::map<unsigned int,vector<PoseID>> seperator_neighbors;
   // Store the set of public poses needed from other robots
   set<PoseID> neighborSharedPoseIDs;
 
@@ -620,6 +627,8 @@ class PGOAgent {
      f(X) = 0.5<Q, XtX> + <X, G>
   */
   void constructQMatrix();
+
+void construct_consensus_QMatrix();
 
   /**
    * @brief Construct the cost matrix G in the local PGO problem
@@ -672,7 +681,7 @@ class PGOAgent {
    * @return ratio
    */
   double computeConvergedLoopClosureRatio();
-
+  
  private:
   // Stores the auxiliary variables from neighbors (only used in acceleration)
   PoseDict neighborAuxPoseDict;

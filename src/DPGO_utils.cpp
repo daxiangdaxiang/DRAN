@@ -63,6 +63,7 @@ Cartan-Sync: https://bitbucket.org/jesusbriales/cartan-sync/src
 
 std::vector<RelativeSEMeasurement> read_g2o_file(const std::string &filename,
                                                  size_t &num_poses) {
+                                                  std::cout<<"open file"<<std::endl;
   // Preallocate output vector
   std::vector<DPGO::RelativeSEMeasurement> measurements;
 
@@ -75,7 +76,7 @@ std::vector<RelativeSEMeasurement> read_g2o_file(const std::string &filename,
 
   // A string used to extract tokens from each line one-by-one
   std::string token;
-
+  std::cout<<"open file"<<std::endl;
   // Preallocate various useful quantities
   double dx, dy, dz, dtheta, dqx, dqy, dqz, dqw, I11, I12, I13, I14, I15, I16,
       I22, I23, I24, I25, I26, I33, I34, I35, I36, I44, I45, I46, I55, I56, I66;
@@ -262,11 +263,151 @@ void constructOrientedConnectionIncidenceMatrixSE(
   OmegaT = Omega;
 }
 
+void construct_consensus_OrientedConnectionIncidenceMatrixSE(
+    const std::vector<RelativeSEMeasurement> &measurements,const std::vector<RelativeSEMeasurement> &shared_measurements,const std::vector<PoseID>neighbor_vec,
+    SparseMatrix &AT,
+    DiagonalMatrix &OmegaT){
+  // Deduce graph dimensions from measurements
+  size_t d;  // Dimension of Euclidean space
+  d = (!measurements.empty() ? measurements[0].t.size() : 0);
+  size_t dh = d + 1;  // Homogenized dimension of Euclidean space
+  size_t m;           // Number of measurements
+  size_t id=measurements[0].r1;
+  m = measurements.size()+shared_measurements.size();
+  size_t n = 0;  // Number of poses
+  for (const RelativeSEMeasurement &meas: measurements) {
+    if (n < meas.p1) n = meas.p1;
+    if (n < meas.p2) n = meas.p2;
+  }
+  n++;  // Account for 0-based indexing: node indexes go from 0 to max({i,j})
+  // n+=neighbor_vec.size();
+  // Define connection incidence matrix dimensions
+  // This is a [n x m] (dh x dh)-block matrix
+  size_t rows = (d + 1) * (n+neighbor_vec.size());
+  size_t cols = (d + 1) * m;
+
+  // We use faster ordered insertion, as suggested in
+  // https://eigen.tuxfamily.org/dox/group__TutorialSparse.html#TutorialSparseFilling
+  Eigen::SparseMatrix<double, Eigen::ColMajor> A(rows, cols);
+  A.reserve(Eigen::VectorXi::Constant(cols, 8));
+  DiagonalMatrix Omega(cols);  // One block per measurement: (d+1)*m
+  DiagonalMatrix::DiagonalVectorType &diagonal = Omega.diagonal();
+
+  // Insert actual measurement values
+  unsigned i, j;
+  for (size_t k = 0; k < measurements.size(); k++) {
+    const RelativeSEMeasurement &meas = measurements[k];
+    i = meas.p1;
+    j = meas.p2;
+
+    /// Assign SE(d) matrix to block leaving node i
+    /// AT(i,k) = -Tij (NOTE: NEGATIVE)
+    // Do it column-wise for speed
+    // Elements of rotation
+    for (size_t c = 0; c < d; c++)
+      for (size_t r = 0; r < d; r++)
+        A.insert(i * dh + r, k * dh + c) = -meas.R(r, c);
+
+    // Elements of translation
+    for (size_t r = 0; r < d; r++)
+      A.insert(i * dh + r, k * dh + d) = -meas.t(r);
+
+    // Additional 1 for homogeneization
+    A.insert(i * dh + d, k * dh + d) = -1;
+
+    /// Assign (d+1)-identity matrix to block leaving node j
+    /// AT(j,k) = +I (NOTE: POSITIVE)
+    for (size_t r = 0; r < d + 1; r++) A.insert(j * dh + r, k * dh + r) = +1;
+
+    /// Assign isotropic weights in diagonal matrix
+    for (size_t r = 0; r < d; r++) diagonal[k * dh + r] = meas.weight * meas.kappa;
+
+    diagonal[k * dh + d] = meas.weight * meas.tau;
+  }
+  unsigned r1,r2;
+  for (size_t k = 0; k < shared_measurements.size(); k++) {
+    const RelativeSEMeasurement &meas = shared_measurements[k];
+    r1=meas.r1;
+    i = meas.p1;
+    j = meas.p2;
+    r2=meas.r2;
+    if(r1==id){
+    /// Assign SE(d) matrix to block leaving node i
+    /// AT(i,k) = -Tij (NOTE: NEGATIVE)
+    // Do it column-wise for speed
+    // Elements of rotation
+      for (size_t c = 0; c < d; c++)
+        for (size_t r = 0; r < d; r++)
+          A.insert(i * dh + r, (k+measurements.size()) * dh + c) = -meas.R(r, c);
+
+      // Elements of translation
+      for (size_t r = 0; r < d; r++)
+        A.insert(i * dh + r, (k+measurements.size()) * dh + d) = -meas.t(r);
+
+      // Additional 1 for homogeneization
+      A.insert(i * dh + d, (k+measurements.size()) * dh + d) = -1;
+      size_t index=0;
+      auto it = std::find(neighbor_vec.begin(), neighbor_vec.end(), std::make_pair(r2,j));
+      if (it != neighbor_vec.end()) {
+       index = std::distance(neighbor_vec.begin(), it);
+      } else {
+          std::cout << "Target not found" << std::endl;
+      }
+      /// Assign (d+1)-identity matrix to block leaving node j
+      /// AT(j,k) = +I (NOTE: POSITIVE)
+      for (size_t r = 0; r < d + 1; r++) A.insert((index+n) * dh + r, (k+measurements.size())  * dh + r) = +1;
+
+      /// Assign isotropic weights in diagonal matrix
+      for (size_t r = 0; r < d; r++) diagonal[(k+measurements.size())  * dh + r] = meas.weight * meas.kappa;
+
+      diagonal[(k+measurements.size())  * dh + d] = meas.weight * meas.tau;
+    }
+    else if(r2==id){
+      size_t index=0;
+      auto it = std::find(neighbor_vec.begin(), neighbor_vec.end(), std::make_pair(r1,i));
+      if (it != neighbor_vec.end()) {
+       index = std::distance(neighbor_vec.begin(), it);
+      } else {
+          std::cout << "Target not found" << std::endl;
+      }
+      for (size_t c = 0; c < d; c++)
+        for (size_t r = 0; r < d; r++)
+          A.insert((index+n) * dh + r, (k+measurements.size()) * dh + c) = -meas.R(r, c);
+
+      // Elements of translation
+      for (size_t r = 0; r < d; r++)
+        A.insert((index+n) * dh + r, (k+measurements.size()) * dh + d) = -meas.t(r);
+
+      // Additional 1 for homogeneization 
+      A.insert((index+n) * dh + d, (k+measurements.size()) * dh + d) = -1;
+   
+      /// Assign (d+1)-identity matrix to block leaving node j
+      /// AT(j,k) = +I (NOTE: POSITIVE)
+      for (size_t r = 0; r < d + 1; r++) A.insert(i * dh + r, (k+measurements.size())  * dh + r) = +1;
+
+      /// Assign isotropic weights in diagonal matrix
+      for (size_t r = 0; r < d; r++) diagonal[(k+measurements.size())  * dh + r] = meas.weight * meas.kappa;
+
+      diagonal[(k+measurements.size())  * dh + d] = meas.weight * meas.tau;
+    }
+  }
+  A.makeCompressed();
+
+  AT = A;
+  OmegaT = Omega;
+}
 SparseMatrix constructConnectionLaplacianSE(
     const std::vector<RelativeSEMeasurement> &measurements) {
   SparseMatrix AT;
   DiagonalMatrix OmegaT;
   constructOrientedConnectionIncidenceMatrixSE(measurements, AT, OmegaT);
+  return AT * OmegaT * AT.transpose();
+}
+SparseMatrix construct_consensus_ConnectionLaplacianSE(
+    const std::vector<RelativeSEMeasurement> &measurements,const std::vector<RelativeSEMeasurement> &shared_measurements,const std::vector<PoseID> neighbor_vec) {
+  SparseMatrix AT;
+  DiagonalMatrix OmegaT;
+  construct_consensus_OrientedConnectionIncidenceMatrixSE(measurements,shared_measurements,neighbor_vec, AT, OmegaT);
   return AT * OmegaT * AT.transpose();
 }
 

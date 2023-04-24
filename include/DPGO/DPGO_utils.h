@@ -38,11 +38,18 @@ Helper function to read a dataset in .g2o format
 std::vector<RelativeSEMeasurement> read_g2o_file(const std::string &filename,
                                                  size_t &num_poses);
 
+SparseMatrix construct_consensus_ConnectionLaplacianSE(
+    const std::vector<RelativeSEMeasurement> &measurements,const std::vector<RelativeSEMeasurement> &shared_measurements,const std::vector<PoseID>neighbor_vec);
 /**
 Helper function to construct connection laplacian matrix in SE(d)
 */
 void constructOrientedConnectionIncidenceMatrixSE(
     const std::vector<RelativeSEMeasurement> &measurements, SparseMatrix &AT,
+    DiagonalMatrix &OmegaT);
+
+void construct_consensus_OrientedConnectionIncidenceMatrixSE(
+    const std::vector<RelativeSEMeasurement> &measurements,const std::vector<RelativeSEMeasurement> &shared_measurements,const std::vector<PoseID>neighbor_vec,
+    SparseMatrix &AT,
     DiagonalMatrix &OmegaT);
 
 /**

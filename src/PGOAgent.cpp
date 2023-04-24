@@ -56,7 +56,7 @@ void PGOAgent::setX(const Matrix &Xin) {
   lock_guard<mutex> lock(mPosesMutex);
   assert(mState != PGOAgentState::WAIT_FOR_DATA);
   assert(Xin.rows() == relaxation_rank());
-  assert(Xin.cols() == (dimension() + 1) * num_poses());
+  assert(Xin.cols() == (dimension() + 1) * (num_poses()+neighborSharedPoseIDs.size()));
   mState = PGOAgentState::INITIALIZED;
   X = Xin;
   if (mParams.acceleration) {
@@ -158,13 +158,13 @@ void PGOAgent::setPoseGraph(
              expected_rows, expected_cols, TInit.rows(), TInit.cols());
     }
   }
-
+  
   // Create new optimization problem
-  mProblemPtr = new QuadraticProblem(num_poses(), dimension(), relaxation_rank());
+  mProblemPtr = new QuadraticProblem(num_poses()+neighborSharedPoseIDs.size(), dimension(), relaxation_rank());
 
   // Robot can construct the quadratic cost matrix now, as it does not depend on neighbor values
-  constructQMatrix();
-
+  // constructQMatrix();
+  construct_consensus_QMatrix();
   // Initialize trajectory estimate in an arbitrary frame
   if (!local_init) {
     if (mParams.verbose) printf("Using provided trajectory initialization.\n");
@@ -179,19 +179,19 @@ void PGOAgent::setPoseGraph(
 
   // If I am the first robot or if cross-robot initialization if off,
   // I will consider myself as initialized in the global frame
-  if (mID == 0 || !mParams.multirobot_initialization) {
-    X = YLift.value() * TLocalInit.value();  // Lift to correct relaxation rank
-    XInit.emplace(X);
-    mState = PGOAgentState::INITIALIZED;
-    if (mParams.acceleration) {
-      initializeAcceleration();
-    }
+  // if (mID == 0 || !mParams.multirobot_initialization) {
+  //   X = YLift.value() * TLocalInit.value();  // Lift to correct relaxation rank
+  //   XInit.emplace(X);
+  //   mState = PGOAgentState::INITIALIZED;
+  //   if (mParams.acceleration) {
+  //     initializeAcceleration();
+  //   }
 
-    // Save initial trajectory
-    if (mParams.logData) {
-      mLogger.logTrajectory(dimension(), num_poses(), TLocalInit.value(), "trajectory_initial.csv");
-    }
-  }
+  //   // Save initial trajectory
+  //   if (mParams.logData) {
+  //     mLogger.logTrajectory(dimension(), num_poses(), TLocalInit.value(), "trajectory_initial.csv");
+  //   }
+  // }
 }
 
 void PGOAgent::addOdometry(const RelativeSEMeasurement &factor) {
@@ -235,14 +235,21 @@ void PGOAgent::addSharedLoopClosure(const RelativeSEMeasurement &factor) {
     localSharedPoseIDs.insert(std::make_pair(mID, factor.p1));
     neighborSharedPoseIDs.insert(std::make_pair(factor.r2, factor.p2));
     neighborRobotIDs.insert(factor.r2);
+    seperator_neighbors[factor.p1].push_back(std::make_pair(factor.r2, factor.p2));
+    auto it=std::find(shared_neighbor.begin(),shared_neighbor.end(),std::make_pair(factor.r2, factor.p2));
+    if(it==shared_neighbor.end())
+      shared_neighbor.push_back(std::make_pair(factor.r2, factor.p2));
   } else {
     assert(factor.r2 == mID);
     n = std::max(n, (unsigned) factor.p2 + 1);
     localSharedPoseIDs.insert(std::make_pair(mID, factor.p2));
     neighborSharedPoseIDs.insert(std::make_pair(factor.r1, factor.p1));
     neighborRobotIDs.insert(factor.r1);
+    seperator_neighbors[factor.p2].push_back(std::make_pair(factor.r1, factor.p1));
+    auto it=std::find(shared_neighbor.begin(),shared_neighbor.end(),std::make_pair(factor.r1, factor.p1));
+    if(it==shared_neighbor.end())
+      shared_neighbor.push_back(std::make_pair(factor.r1, factor.p1));
   }
-
   lock_guard<mutex> lock(mMeasurementsMutex);
   sharedLoopClosures.push_back(factor);
 }
@@ -430,7 +437,18 @@ void PGOAgent::initializeInGlobalFrame(unsigned neighborID, const PoseDict &pose
 
   if (optimizationHalted) startOptimizationLoop(mRate);
 }
+void PGOAgent::fillsharedX(unsigned sharedID, const PoseDict &poseDict){
+  for(const auto &it: poseDict){
+    const auto nID = it.first;
+    const auto var = it.second;
+    if (neighborSharedPoseIDs.find(nID) == neighborSharedPoseIDs.end())
+      if(nID.first!=sharedID)
+        continue;
+    X_shared[nID]=var;
+  }
+  return;
 
+}
 void PGOAgent::updateNeighborPoses(unsigned neighborID, const PoseDict &poseDict) {
   assert(neighborID != mID);
   // Initialize this robot in the global frame, if not initialized
@@ -651,21 +669,21 @@ void PGOAgent::iterate(bool doOptimization) {
   }
 
   // Update measurement weights (GNC)
-  if (shouldUpdateLoopClosureWeights()) {
-    updateLoopClosuresWeights();
-    mRobustCost.update();
-    // If warm start is disabled, reset trajectory estimate to initial guess
-    if (!mParams.robustOptWarmStart) {
-      assert(XInit);
-      X = XInit.value();
-      printf("Warm start is disabled. Robot %u resets trajectory estimates.\n", getID());
-    }
-    // Reset acceleration
-    if (mParams.acceleration) {
-      initializeAcceleration();
-    }
+  // if (shouldUpdateLoopClosureWeights()) {
+  //   updateLoopClosuresWeights();
+  //   mRobustCost.update();
+  //   // If warm start is disabled, reset trajectory estimate to initial guess
+  //   if (!mParams.robustOptWarmStart) {
+  //     assert(XInit);
+  //     X = XInit.value();
+  //     printf("Warm start is disabled. Robot %u resets trajectory estimates.\n", getID());
+  //   }
+  //   // Reset acceleration
+  //   if (mParams.acceleration) {
+  //     initializeAcceleration();
+  //   }
 
-  }
+  // }
 
   // Perform iteration
   if (mState == PGOAgentState::INITIALIZED) {
@@ -779,7 +797,21 @@ void PGOAgent::constructQMatrix() {
   assert(mProblemPtr);
   mProblemPtr->setQ(Q);
 }
+void PGOAgent::construct_consensus_QMatrix() {
+  vector<RelativeSEMeasurement> privateMeasurements = odometry;
 
+  privateMeasurements.insert(privateMeasurements.end(), privateLoopClosures.begin(), privateLoopClosures.end());
+  // privateMeasurements.insert(privateMeasurements.end(), sharedLoopClosures.begin(), sharedLoopClosures.end());
+
+  // Initialize Q with private measurements
+  // SparseMatrix Q = constructConnectionLaplacianSE(privateMeasurements);
+  SparseMatrix Q =construct_consensus_ConnectionLaplacianSE(privateMeasurements,sharedLoopClosures,shared_neighbor);
+
+
+
+  assert(mProblemPtr);
+  mProblemPtr->setQ(Q);
+}
 bool PGOAgent::constructGMatrix(const PoseDict &poseDict) {
   SparseMatrix G(relaxation_rank(), (dimension() + 1) * num_poses());
 
@@ -1163,7 +1195,85 @@ bool PGOAgent::updateX(bool doOptimization, bool acceleration) {
 
   return true;
 }
+bool PGOAgent::updateX_new(bool doOptimization, bool acceleration) {
+  if (!doOptimization) {
 
+    return true;
+  }
+
+  if (mParams.verbose)
+    printf("Robot %u optimize at iteration %u... \n", getID(), iteration_number());
+
+
+
+  assert(mState == PGOAgentState::INITIALIZED);
+
+  // Update quadratic cost matrix (unless using L2 cost function since it does not change measurement weights)
+  if (mParams.robustCostType != RobustCostType::L2) {
+    constructQMatrix();
+  }
+
+  // Construct linear cost matrix (depending on neighbor robots' poses)
+  bool hasG;
+
+  hasG = constructGMatrix(neighborPoseDict);
+  for(const auto &m: sharedLoopClosures){
+    Matrix T = Matrix::Zero(d + 1, d + 1);
+    T.block(0, 0, d, d) = m.R;
+    T.block(0, d, d, 1) = m.t;
+    T(d, d) = 1;
+    if(m.r1==mID){
+      assert(m.r2 != mID);
+      // Modify quadratic cost
+      size_t idx = m.p1;
+
+    }
+  } 
+
+  // Skip update if G matrix is not constructed successfully
+  if (!hasG) {
+    if (mParams.verbose) {
+      printf("Robot %u could not construct G matrix. Skip update...\n", getID());
+    }
+    return false;
+  }
+
+  // Initialize optimizer
+  QuadraticOptimizer optimizer(mProblemPtr);
+  optimizer.setVerbose(mParams.verbose);
+  optimizer.setAlgorithm(mParams.algorithm);
+  optimizer.setTrustRegionTolerance(1e-2); // Force optimizer to make progress
+  optimizer.setTrustRegionIterations(1);
+  optimizer.setTrustRegionMaxInnerIterations(10);
+  optimizer.setTrustRegionInitialRadius(100);
+
+  // Starting solution
+  Matrix XInit;
+  if (acceleration) {
+    XInit = Y;
+  } else {
+    XInit = X;
+  }
+  assert(XInit.rows() == relaxation_rank());
+  assert(XInit.cols() == (dimension() + 1) * num_poses());
+
+  // Optimize!
+  X = optimizer.optimize(XInit);
+  assert(X.rows() == relaxation_rank());
+  assert(X.cols() == (dimension() + 1) * num_poses());
+
+  // Print optimization statistics
+  const auto &result = optimizer.getOptResult();
+  if (mParams.verbose) {
+    printf("df: %f, gn0: %f, gn1: %f, df/gn0: %f\n",
+           result.fInit - result.fOpt,
+           result.gradNormInit,
+           result.gradNormOpt,
+           (result.fInit - result.fOpt) / result.gradNormInit);
+  }
+
+  return true;
+}
 void PGOAgent::resetTeamStatus() {
   mTeamStatus.clear();
   for (unsigned robot = 0; robot < mParams.numRobots; ++robot) {
@@ -1192,7 +1302,7 @@ void PGOAgent::updateLoopClosuresWeights() {
     double weight = mRobustCost.weight(residual);
     m.weight = weight;
     if (mParams.verbose) {
-      printf("Agent %u update edge: (%zu, %zu) -> (%zu, %zu), residual = %f, weight = %f \n",
+      printf("Agent %u update edge: (%u, %u) -> (%u, %u), residual = %f, weight = %f \n",
              getID(), m.r1, m.p1, m.r2, m.p2, residual, weight);
     }
   }
@@ -1210,7 +1320,7 @@ void PGOAgent::updateLoopClosuresWeights() {
       const PoseID nbrPoseID = std::make_pair(m.r2, m.p2);
       auto KVpair = neighborPoseDict.find(nbrPoseID);
       if (KVpair == neighborPoseDict.end()) {
-        printf("Agent %u cannot update edge: (%zu, %zu) -> (%zu, %zu). \n",
+        printf("Agent %u cannot update edge: (%u, %u) -> (%u, %u). \n",
                getID(), m.r1, m.p1, m.r2, m.p2);
         continue;
       }
@@ -1225,7 +1335,7 @@ void PGOAgent::updateLoopClosuresWeights() {
       const PoseID nbrPoseID = std::make_pair(m.r1, m.p1);
       auto KVpair = neighborPoseDict.find(nbrPoseID);
       if (KVpair == neighborPoseDict.end()) {
-        printf("Agent %u cannot update edge: (%zu, %zu) -> (%zu, %zu). \n",
+        printf("Agent %u cannot update edge: (%u, %u) -> (%u, %u). \n",
                getID(), m.r1, m.p1, m.r2, m.p2);
         continue;
       }
@@ -1237,7 +1347,7 @@ void PGOAgent::updateLoopClosuresWeights() {
     double weight = mRobustCost.weight(residual);
     m.weight = weight;
     if (mParams.verbose) {
-      printf("Agent %u update edge: (%zu, %zu) -> (%zu, %zu), residual = %f, weight = %f \n",
+      printf("Agent %u update edge: (%u, %u) -> (%u, %u), residual = %f, weight = %f \n",
              getID(), m.r1, m.p1, m.r2, m.p2, residual, weight);
     }
   }
