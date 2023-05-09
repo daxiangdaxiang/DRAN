@@ -255,7 +255,16 @@ class PGOAgent {
   Return ID of this robot
   */
   inline unsigned getID() const { return mID; }
-  void fillsharedX(unsigned neighborID, const PoseDict &poseDict);
+
+  /**
+   * @brief new_added update shared variables
+   * 
+   * @param neighborID 
+   * @param poseDict 
+   */
+  void update_sharedX(unsigned neighborID, const PoseDict &poseDict);
+
+  void update_sharedH(unsigned sharedID, const std::map<PoseID,Matrix>&poseDict);
   /**
   Return number of poses of this robot
   */
@@ -315,7 +324,14 @@ class PGOAgent {
    */
   std::vector<unsigned> getNeighborPublicPoses(
       const unsigned &neighborID) const;
-  bool updateX_new(bool doOptimization, bool acceleration);
+
+  /**
+   * @brief new_added optimization
+   * 
+   * @param doOptimization 
+ 
+   */
+  bool updateX_new(bool doOptimization);
   /**
   Get vector of neighbor robot IDs.
   */
@@ -374,6 +390,13 @@ class PGOAgent {
    */
   bool getSharedPoseDict(PoseDict &map);
 
+  /**
+   * @brief new_added Get the Shared H object
+   * 
+   * @param map 
+
+   */
+  bool getShared_H(std::map<PoseID,Matrix> &map);
   /**
    * @brief Get a map of all auxiliary variables associated with public poses of this robot
    * @param map
@@ -495,6 +518,29 @@ class PGOAgent {
    */
   Matrix localPoseGraphOptimization();
 
+  /**
+   * @brief Get the seperator's neighbor robot id 
+   * 
+   */
+  set<unsigned>get_seperator_neighbors(unsigned seperator){
+    return seperator_neighbors[seperator];
+  }
+
+  /**
+   * @brief get neighbors seperator id
+   * 
+   */
+ vector<unsigned>get_neighbor_seperators(PoseID neighbor){
+    return neighbor_seperators[neighbor];
+  }
+  void testQ();
+
+ 
+  std::map<PoseID,Matrix> get_X_neighbor(){ return X_neighbor;}
+  std::map<PoseID,std::map<unsigned,Matrix>> get_X_seperator(){return X_seperator;}
+
+
+
  protected:
   // The unique ID associated to this robot
   unsigned mID;
@@ -558,7 +604,8 @@ class PGOAgent {
 
   // Initial iterate
   std::optional<Matrix> XInit;
-  std::map<PoseID,Matrix> X_shared;
+
+
 
   // Initial solution TInit = [R1 t1 ... Rn tn] in an arbitrary coordinate frame
   std::optional<Matrix> TLocalInit;
@@ -584,7 +631,20 @@ class PGOAgent {
   vector<PoseID> shared_neighbor;
   // Store the set of public poses that need to be sent to other robots
   set<PoseID> localSharedPoseIDs;
-  std::map<unsigned int,vector<PoseID>> seperator_neighbors;
+  
+  // std::map<unsigned int,vector<PoseID>> seperator_neighbors;
+  std::map<unsigned int,set<unsigned>> seperator_neighbors;
+  std::map<PoseID,vector<unsigned>> neighbor_seperators;
+
+  std::map<PoseID,Matrix> H_local;
+  std::map<PoseID,Matrix> H_neighbor;
+  std::map<PoseID,std::map<unsigned,Matrix>> H_seperator;
+  std::map<PoseID,Matrix> X_grad;
+  //new_added store neighbor's variables
+  std::map<PoseID,Matrix> X_neighbor;
+  //new_added store seperator's variables
+  std::map<PoseID,std::map<unsigned,Matrix>> X_seperator;
+
   // Store the set of public poses needed from other robots
   set<PoseID> neighborSharedPoseIDs;
 
@@ -627,6 +687,29 @@ class PGOAgent {
      f(X) = 0.5<Q, XtX> + <X, G>
   */
   void constructQMatrix();
+
+
+/**
+ * @brief new_added,Get the distance_r 
+ * 
+ */
+void get_distance_r(const Matrix &R,const std::map<unsigned,Matrix> &sep_neighbors,double &dis_r);
+void get_distance_t(const Vector &t,const std::map<unsigned,Matrix> &sep_neighbors,double &dis_t);
+
+
+
+  /**
+   * @brief new_added do riemanian consensus
+   * 
+   */
+void consensus_step(double stepsize, int num_iter=5);
+/**
+ * @brief new_added do gradient_tracking
+ * 
+ * @param stepsize 
+ */
+void gradient_tracking_step(double stepsize,int num_iter=8);
+void  update_private_variable_step(double stepsize,int num_iter=8);
 
 void construct_consensus_QMatrix();
 
@@ -700,6 +783,8 @@ void construct_consensus_QMatrix();
 
   // Save previous iteration (for restarting)
   Matrix XPrev;
+  Matrix grad_prev;
+  Matrix grad;
 
   void updateGamma();
 

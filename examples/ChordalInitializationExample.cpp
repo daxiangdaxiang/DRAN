@@ -40,6 +40,7 @@ int main(int argc, char **argv) {
 
   // Construct optimization problem
   SparseMatrix QCentral = constructConnectionLaplacianSE(dataset);
+  cout<<QCentral<<endl;
   QuadraticProblem problemCentral(n, d, d);
   problemCentral.setQ(QCentral);
 

@@ -10,7 +10,7 @@
 
 #include <DPGO/DPGO_types.h>
 #include <DPGO/RelativeSEMeasurement.h>
-
+#include<cmath>
 #include <Eigen/Dense>
 #include <Eigen/SVD>
 
@@ -32,6 +32,10 @@ void writeMatrixToFile(const Matrix &M, const std::string &filename);
  */
 void writeSparseMatrixToFile(const SparseMatrix &M, const std::string &filename);
 
+
+Vector vee(Matrix S);
+Matrix expmap(const Matrix &S);
+Matrix logmap(Matrix R);
 /**
 Helper function to read a dataset in .g2o format
 */

@@ -63,7 +63,6 @@ Cartan-Sync: https://bitbucket.org/jesusbriales/cartan-sync/src
 
 std::vector<RelativeSEMeasurement> read_g2o_file(const std::string &filename,
                                                  size_t &num_poses) {
-                                                  std::cout<<"open file"<<std::endl;
   // Preallocate output vector
   std::vector<DPGO::RelativeSEMeasurement> measurements;
 
@@ -76,7 +75,6 @@ std::vector<RelativeSEMeasurement> read_g2o_file(const std::string &filename,
 
   // A string used to extract tokens from each line one-by-one
   std::string token;
-  std::cout<<"open file"<<std::endl;
   // Preallocate various useful quantities
   double dx, dy, dz, dtheta, dqx, dqy, dqz, dqw, I11, I12, I13, I14, I15, I16,
       I22, I23, I24, I25, I26, I33, I34, I35, I36, I44, I45, I46, I55, I56, I66;
@@ -273,6 +271,7 @@ void construct_consensus_OrientedConnectionIncidenceMatrixSE(
   size_t dh = d + 1;  // Homogenized dimension of Euclidean space
   size_t m;           // Number of measurements
   size_t id=measurements[0].r1;
+  // std::cout<<"my id: "<<id<<std::endl;
   m = measurements.size()+shared_measurements.size();
   size_t n = 0;  // Number of poses
   for (const RelativeSEMeasurement &meas: measurements) {
@@ -350,6 +349,8 @@ void construct_consensus_OrientedConnectionIncidenceMatrixSE(
       auto it = std::find(neighbor_vec.begin(), neighbor_vec.end(), std::make_pair(r2,j));
       if (it != neighbor_vec.end()) {
        index = std::distance(neighbor_vec.begin(), it);
+       
+      //  cout<<"robot"
       } else {
           std::cout << "Target not found" << std::endl;
       }
@@ -367,6 +368,8 @@ void construct_consensus_OrientedConnectionIncidenceMatrixSE(
       auto it = std::find(neighbor_vec.begin(), neighbor_vec.end(), std::make_pair(r1,i));
       if (it != neighbor_vec.end()) {
        index = std::distance(neighbor_vec.begin(), it);
+      //  std::cout<<"robot:"<<r2<<" id:"<<j<<" to robot:"<<r1<<" id:"<<i<<std::endl;
+      //  std::cout<<index<<std::endl;
       } else {
           std::cout << "Target not found" << std::endl;
       }
@@ -383,7 +386,7 @@ void construct_consensus_OrientedConnectionIncidenceMatrixSE(
    
       /// Assign (d+1)-identity matrix to block leaving node j
       /// AT(j,k) = +I (NOTE: POSITIVE)
-      for (size_t r = 0; r < d + 1; r++) A.insert(i * dh + r, (k+measurements.size())  * dh + r) = +1;
+      for (size_t r = 0; r < d + 1; r++) A.insert(j* dh + r, (k+measurements.size())  * dh + r) = +1;
 
       /// Assign isotropic weights in diagonal matrix
       for (size_t r = 0; r < d; r++) diagonal[(k+measurements.size())  * dh + r] = meas.weight * meas.kappa;
@@ -408,9 +411,51 @@ SparseMatrix construct_consensus_ConnectionLaplacianSE(
   SparseMatrix AT;
   DiagonalMatrix OmegaT;
   construct_consensus_OrientedConnectionIncidenceMatrixSE(measurements,shared_measurements,neighbor_vec, AT, OmegaT);
+  // std::cout<<AT<<std::endl;
+    //  for (int i = 0; i < AT.rows(); ++i) {
+    //     for (int j = 0; j < AT.cols(); ++j) {
+    //         std::cout<<std::setw(10)<< AT.coeff(i, j)<<" ";
+    //     }
+    //     std::cout<<std::endl;
+    //     }
   return AT * OmegaT * AT.transpose();
 }
+ Matrix logmap(Matrix R){
+      Matrix log=Matrix::Zero(3,3);
+      double w=(R.trace()-1)*0.5;
+      double theta=std::acos(std::max(-1.0, std::min(1.0, w)));
+      // std::cout<<"theta="<<theta<<std::endl;
+      if(theta==0)
+        return log;
+      else
+        log=0.5*theta*(R-R.transpose())/std::sin(theta);
+      return log;
+  }
+  Vector vee(Matrix S){
+    if (S(2,1) == -S(1,2) && S(0,2) == -S(2,0) && S(1,0) == -S(0,1)) {
+        return Eigen::Vector3d(S(2,1), S(0,2), S(1,0));
+    } else {
+        throw std::runtime_error("Error in vee(): input matrix is not skew-symmetric");
+    }
+}
+  Matrix expmap(const Matrix &S){
+    // Vector omega=vee(S);
+    // double w=omega.norm();
+    
+    Matrix ExpS=Matrix::Zero(3,3);
+    Matrix Sq=S.transpose()*S;
+    double a=sqrt(0.5*Sq.trace());
+    // std::cout<<"a: "<<a<<std::endl;
 
+    if(a==0)
+      ExpS=Eigen::Matrix3d::Identity();
+    else
+      
+      ExpS=Eigen::Matrix3d::Identity()+sin(a)*S/a+(1-cos(a))*S*S/(a*a);
+    // std::cout<<"exps: "<<std::endl<<ExpS<<std::endl;
+    return ExpS;
+
+  }
 void constructBMatrices(const std::vector<RelativeSEMeasurement> &measurements, SparseMatrix &B1,
                         SparseMatrix &B2, SparseMatrix &B3) {
   // Clear input matrices

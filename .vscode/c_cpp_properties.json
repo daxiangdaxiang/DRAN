@@ -1,38 +1,18 @@
 {
-  "configurations": [
-    {
-      "browse": {
-        "databaseFilename": "${default}",
-        "limitSymbolsToIncludedHeaders": false
-      },
-      "includePath": [
-        "/home/hjx/dpgo_ros/src/dpgo/**",
-        "/home/hjx/dancer-workspace/workspaces/lib/devel/include/**",
-        "/opt/ros/melodic/include/**",
-        "/home/hjx/catkin_ws/src/VINS-Fusion/camera_models/include/**",
-        "/home/hjx/dancer-workspace/workspaces/lib/src/dancer-geometry/include/**",
-        "/home/hjx/dancer-workspace/workspaces/core/src/dancer-io/include/**",
-        "/home/hjx/dancer-workspace/workspaces/lib/src/dcommon/include/**",
-        "/home/hjx/dancer-workspace/workspaces/core/src/dconfig/include/**",
-        "/home/hjx/dancer-workspace/workspaces/core/src/dancer-monitor/include/**",
-        "/home/hjx/dancer-workspace/workspaces/core/src/dmotion/include/**",
-        "/home/hjx/dancer-workspace/workspaces/core/src/dnetwork/include/**",
-        "/home/hjx/dpgo_ros/src/dpgo/include/**",
-       
-        "/home/hjx/dancer-workspace/workspaces/lib/src/dprocess/include/**",
-        "/home/hjx/dancer-workspace/workspaces/lib/src/dtransmit/include/**",
-        "/home/hjx/dancer-workspace/workspaces/core/src/dvision/include/**",
-        "/home/hjx/dancer-workspace/workspaces/core/src/dviz/include/**",
-        "/home/hjx/dancer-workspace/workspaces/lib/src/fmt/include/**",
-        "/home/hjx/dpgo_ros/src/pose_graph_tools/include/**",
-        "/usr/include/**"
-      ],
-      "name": "ROS",
-      "intelliSenseMode": "gcc-x64",
-      "compilerPath": "/usr/bin/gcc",
-      "cStandard": "gnu11",
-      "cppStandard": "c++17"
-    }
-  ],
-  "version": 4
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/usr/include/eigen3",
+                "/usr/include/suitesparse"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
 }

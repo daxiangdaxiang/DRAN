@@ -216,6 +216,7 @@ int main(int argc, char **argv) {
       }
     }
     Matrix RGrad = problemCentral.RieGrad(Xopt);
+    cout<<RGrad<<std::endl;
     double RGradNorm  = RGrad.norm();
     std::cout << std::setprecision(5)
               << "Iter = " << iter << " | "

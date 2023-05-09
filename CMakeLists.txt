@@ -90,9 +90,9 @@ if(OPENMP_FOUND)
 endif()
 
 # Build Distributed PGO example
-add_executable(multi-robot-example
-		examples/MultiRobotExample.cpp)
-target_link_libraries(multi-robot-example DPGO)
+# add_executable(multi-robot-example
+# 		examples/MultiRobotExample.cpp)
+# target_link_libraries(multi-robot-example DPGO)
 
 add_executable(consensus
 		examples/test.cpp)
@@ -102,13 +102,13 @@ add_executable(chordal-initialization-example
 		examples/ChordalInitializationExample.cpp)
 target_link_libraries(chordal-initialization-example DPGO)
 
-add_executable(single-robot-example
-	examples/SingleRobotExample.cpp)
-target_link_libraries(single-robot-example DPGO)
+# add_executable(single-robot-example
+# 	examples/SingleRobotExample.cpp)
+# target_link_libraries(single-robot-example DPGO)
 
 ############################### TESTS ##########################################
 ### Add testing
-option(BUILD_DPGO_TESTS "Build tests" ON)
+option(BUILD_DPGO_TESTS "Build tests" OFF)
 if(BUILD_DPGO_TESTS)
 
 	configure_file(${CMAKE_CURRENT_SOURCE_DIR}/cmake/gtest.cmake googletest-download/CMakeLists.txt)

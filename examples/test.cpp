@@ -55,7 +55,9 @@ int main(int argc, char **argv) {
   r = 3;
   bool acceleration = false;
   bool verbose = true;
-  unsigned numIters = 1000;
+  // unsigned numIters = 1000;
+  unsigned numIters = 100;
+
 
   // Construct the centralized problem (used for evaluation)
   SparseMatrix QCentral = constructConnectionLaplacianSE(dataset);
@@ -156,110 +158,161 @@ int main(int argc, char **argv) {
     if (robot == (unsigned) num_robots - 1) endIdx = n;
     vector<PoseID> neighbor_poseid=agents[robot]->get_neighborid();
     Matrix initX(r,(endIdx - startIdx+neighbor_poseid.size()) * (d + 1));
+    initX.setZero();
     initX.block(0, 0, r, (endIdx - startIdx) * (d + 1))=XChordal.block(0, startIdx * (d + 1), r, (endIdx - startIdx) * (d + 1));
     for(size_t k=0;k<neighbor_poseid.size();k++){
       unsigned id=neighbor_poseid[k].first;
       unsigned po=neighbor_poseid[k].second;
       initX.block(0,(endIdx - startIdx+k) * (d + 1),r,d+1)=XChordal.block(0,(id*num_poses_per_robot+po)*(d+1),r,d+1);
     }
-    // agents[robot]->setX(XChordal.block(0, startIdx * (d + 1), r, (endIdx - startIdx) * (d + 1)));
+    agents[robot]->setX(initX);
   }
-  cout<<"initialization over"<<endl;
+  
+  // // check Q
+  //   vector<PoseID> neighbor=agents[0]->get_neighborid();
+  //   PoseID last=neighbor.back();
+  //   // for(auto i :neighbor)
+  //   //   cout<<i.first<<","<<i.second<<endl;
+  //   // cout<<last.first<<","<<last.second<<endl;
+  //   vector<unsigned> seperator=agents[0]->get_neighbor_seperators(last);
+  //   // for(auto i: seperator)
+  //   //   cout<<i<<" "<<agents[0]->num_poses()<<" "<<neighbor.size()<<endl;
+  //   agents[0]->testQ();
 
-  // for(auto *selectedRobotPtr: agents){
-  //   for(auto *robotPtr : agents) {
-  //     PoseDict sharedPoses;
-  //     if (!robotPtr->getSharedPoseDict(sharedPoses)) {
-  //       continue;
-  //       selectedRobotPtr->fillsharedX(robotPtr->getID(), sharedPoses);
+
+  // check intialization
+  // for(int j=0;j<num_robots;j++){
+  // vector<PoseID> neighbor=agents[j]->get_neighborid();
+  //   for(int i=0;i<neighbor.size();i++){
+  //     cout<<neighbor[i].first<<" "<<neighbor[i].second<<endl;
+  //     Matrix neighbor_matrix;
+  //     agents[neighbor[i].first]->getSharedPose(neighbor[i].second,neighbor_matrix);
+  //     Matrix local_matrix;
+  //     // cout<<neighbor_matrix<<endl;
+  //     unsigned local_nfpose=agents[j]->num_poses();
+  //     agents[j]->getSharedPose(local_nfpose+i,local_matrix);
+  //     if(local_matrix==neighbor_matrix)
+  //       cout<<"true"<<endl;
+  //     else
+  //       cout<<"false"<<endl;
   //   }
-  // }}
+  // }
 
+  //communicate 
+
+ 
+/** check communicate**/
+  // std::map<PoseID,Matrix> test_neighbor=agents[1]->get_X_neighbor();
+  // std::map<PoseID,std::map<unsigned,Matrix>> test_seperator=agents[1]->get_X_seperator();
+// //check neighbor
+  // // for(auto &i: test_neighbor)
+  // //   {cout<<"get variable of neighbor "<<i.first.first<<","<<i.first.second<<endl;
+  // //   // cout<<i.second<<endl;
+  // //   // Matrix mat;
+  // //   // agents[i.first.first]->getSharedPose(i.first.second,mat);
+  // //   // cout<<mat<<endl;
+  // //   }
+// // check seperator
+  // cout<<test_seperator.size()<<endl;
+  // for(auto& kv: test_seperator){
+  //   cout<<"get variable of seperator "<<kv.first.first<<","<<kv.first.second<<endl;
+  //   // cout<<"in total "<<agents[1]->get_seperator_neighbors(kv.first.second).size()<<endl;
+  //   // cout<<kv.second.size();
+  //   // for(auto i : agents[0]->get_seperator_neighbors(kv.first.second))
+  //   //   cout<<i.first<<","<<i.second<<";";
+  //   cout<<"shared"<<endl;
+  //   for(auto mat:kv.second){
+  //       cout<<mat.second<<endl;
+  //   }
+  //   // cout<<endl;
+  //   Matrix mat;
+  //   agents[kv.first.first]->getSharedPose(kv.first.second,mat);
+  //   cout<<"local"<<endl<<mat<<endl;
+  // }
+
+  std::cout<<std::endl<<"initial cost: "<< 2 * problemCentral.f(XChordal)<<std::endl;
+  
   /**
   ###########################################
   Optimization loop
   ###########################################
-  */
-  // Matrix Xopt(r, n * (d + 1));
-  // unsigned selectedRobot = 0;
-  // cout << "Running " << numIters << " iterations..." << endl;
-  // for (unsigned iter = 0; iter < numIters; ++iter) {
-  //   PGOAgent *selectedRobotPtr = agents[selectedRobot];
+  */  
 
-  //   // Non-selected robots perform an iteration
-  //   for (auto *robotPtr : agents) {
-  //     assert(robotPtr->instance_number() == 0);
-  //     assert(robotPtr->iteration_number() == iter);
-  //     if (robotPtr->getID() != selectedRobot) {
-  //       robotPtr->iterate(false);
-  //     }
-  //   }
+  Matrix Xopt(r, n * (d + 1));
+  unsigned selectedRobot = 0;
+  cout << "Running " << numIters << " iterations..." << endl;
+  for (unsigned iter = 0; iter < numIters; ++iter) {
+    PGOAgent *selectedRobotPtr = agents[selectedRobot];
 
-  //   // Selected robot requests public poses from others
-  //   for (auto *robotPtr : agents) {
-  //     if (robotPtr->getID() == selectedRobot) continue;
-  //     PoseDict sharedPoses;
-  //     if (!robotPtr->getSharedPoseDict(sharedPoses)) {
-  //       continue;
-  //     }
-  //     selectedRobotPtr->setNeighborStatus(robotPtr->getStatus());
-  //     selectedRobotPtr->updateNeighborPoses(robotPtr->getID(), sharedPoses);
-  //   }
+    // Selected robot requests public poses from others
+    for(auto *robotPtr : agents) {
+      if(selectedRobot==robotPtr->getID())
+        continue;
+      PoseDict sharedPoses;
+      if (robotPtr->getSharedPoseDict(sharedPoses)) 
+        selectedRobotPtr->update_sharedX(robotPtr->getID(), sharedPoses); 
 
-  //   // Selected robot update
-  //   selectedRobotPtr->iterate(true);
+      std::map<PoseID,Matrix> shared_H;
+      if (robotPtr->getShared_H(shared_H)) 
+        selectedRobotPtr->update_sharedH(robotPtr->getID(), shared_H); 
 
-  //   // Form centralized solution
-  //   for (unsigned robot = 0; robot < (unsigned) num_robots; ++robot) {
-  //     unsigned startIdx = robot * num_poses_per_robot;
-  //     unsigned endIdx = (robot + 1) * num_poses_per_robot;  // non-inclusive
-  //     if (robot == (unsigned) num_robots - 1) endIdx = n;
+      }
 
-  //     Matrix XRobot;
-  //     if (agents[robot]->getX(XRobot)) {
-  //       Xopt.block(0, startIdx * (d + 1), r, (endIdx - startIdx) * (d + 1)) = XRobot;
-  //     }
-  //   }
-  //   Matrix RGrad = problemCentral.RieGrad(Xopt);
-  //   double RGradNorm  = RGrad.norm();
-  //   std::cout << std::setprecision(5)
-  //             << "Iter = " << iter << " | "
-  //             << "robot = " << selectedRobotPtr->getID() << " | "
-  //             << "cost = " << 2 * problemCentral.f(Xopt) << " | "
-  //             << "gradnorm = " << RGradNorm << std::endl;
+    // Non-selected robots perform an iteration
+    for (auto *robotPtr : agents) {
+      assert(robotPtr->instance_number() == 0);
+      assert(robotPtr->iteration_number() == iter);
+      if (robotPtr->getID() != selectedRobot) {
+        robotPtr->iterate(false);
+      }
+    }
 
-  //   // Exit if gradient norm is sufficiently small
-  //   if (RGradNorm < 0.1) {
-  //     break;
-  //   }
 
-  //   // Select next robot with largest gradient norm
-  //   std::vector<unsigned> neighbors = selectedRobotPtr->getNeighbors();
-  //   if (neighbors.empty()) {
-  //     selectedRobot = selectedRobotPtr->getID();
-  //   } else {
-  //     std::vector<double> gradNorms;
-  //     for (size_t robot = 0; robot < (unsigned) num_robots; ++robot) {
-  //       unsigned startIdx = robot * num_poses_per_robot;
-  //       unsigned endIdx = (robot + 1) * num_poses_per_robot;  // non-inclusive
-  //       if (robot == (unsigned) num_robots - 1) endIdx = n;
-  //       Matrix RGradRobot = RGrad.block(0, startIdx * (d + 1), r, (endIdx - startIdx) * (d + 1));
-  //       gradNorms.push_back(RGradRobot.norm());
-  //     }
-  //     selectedRobot = std::max_element(gradNorms.begin(), gradNorms.end()) - gradNorms.begin();
-  //   }
+    // // Selected robot update
+    selectedRobotPtr->iterate(true);
 
-  //   // Share global anchor for rounding
-  //   Matrix M;
-  //   agents[0]->getSharedPose(0, M);
-  //   for (auto agentPtr : agents) {
-  //     agentPtr->setGlobalAnchor(M);
-  //   }
-  // }
+    // cout<<"perform once"<<endl;
 
-  // for (auto agentPtr : agents) {
-  //   agentPtr->reset();
-  // }
+
+    // Form centralized solution
+
+    for (unsigned robot = 0; robot < (unsigned) num_robots; ++robot) {
+      unsigned startIdx = robot * num_poses_per_robot;
+      unsigned endIdx = (robot + 1) * num_poses_per_robot;  // non-inclusive
+      if (robot == (unsigned) num_robots - 1) endIdx = n;
+
+      Matrix XRobot;
+      if (agents[robot]->getX(XRobot)) {
+        Xopt.block(0, startIdx * (d + 1), r, (endIdx - startIdx) * (d + 1)) = XRobot;
+      }
+    }
+    Matrix RGrad = problemCentral.RieGrad(Xopt);
+    double RGradNorm  = RGrad.norm();
+    std::cout << std::setprecision(6)
+              << "Iter = " << iter << " | "
+              << "robot = " << selectedRobotPtr->getID() << " | "
+              << "cost = " << 2 * problemCentral.f(Xopt) << " | "
+              << "gradnorm = " << RGradNorm << std::endl<< std::endl;
+
+    // Exit if gradient norm is sufficiently small
+    if (RGradNorm < 0.1) {
+      break;
+    }
+    selectedRobot+=1;
+    if(selectedRobot==num_robots)
+      selectedRobot=0;
+
+    // Share global anchor for rounding
+    Matrix M;
+    agents[0]->getSharedPose(0, M);
+    for (auto agentPtr : agents) {
+      agentPtr->setGlobalAnchor(M);
+    }
+  }
+
+  for (auto agentPtr : agents) {
+    agentPtr->reset();
+  }
 
   exit(0);
 }
