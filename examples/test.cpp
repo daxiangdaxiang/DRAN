@@ -56,7 +56,7 @@ int main(int argc, char **argv) {
   bool acceleration = false;
   bool verbose = true;
   // unsigned numIters = 1000;
-  unsigned numIters = 100;
+  unsigned numIters = 200;
 
 
   // Construct the centralized problem (used for evaluation)
@@ -316,3 +316,4 @@ int main(int argc, char **argv) {
 
   exit(0);
 }
+

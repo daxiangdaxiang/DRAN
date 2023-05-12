@@ -43,7 +43,9 @@ Matrix QuadraticOptimizer::optimize(const Matrix &Y) {
     YOpt = trustRegion(Y);
   } else {
     assert(algorithm == ROPTALG::RGD);
-    YOpt = gradientDescent(Y);
+    // YOpt = gradientDescent(Y);
+     YOpt = gradientDescentLS(Y);
+
   }
 
   // Compute statistics after optimization
@@ -157,9 +159,10 @@ Matrix QuadraticOptimizer::gradientDescentLS(const Matrix &Yinit) {
   VarInit.setData(Yinit);
 
   ROPTLIB::RSD Solver(problem, VarInit.var());
+  // Solver.Stop_Criterion = ROPTLIB::StopCrit::GRAD_F;
   Solver.Stop_Criterion = ROPTLIB::StopCrit::GRAD_F;
   Solver.Tolerance = 1e-2;
-  Solver.Max_Iteration = 10;
+  Solver.Max_Iteration = 2;
   Solver.Debug =
       (verbose ? ROPTLIB::DEBUGINFO::DETAILED : ROPTLIB::DEBUGINFO::NOOUTPUT);
   Solver.Run();

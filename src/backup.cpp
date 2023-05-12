@@ -1280,12 +1280,12 @@ bool PGOAgent::updateX_new(bool doOptimization) {
   // Starting solution
   Matrix XInit;
   XPrev= X;
-  double stepsize=1e-3;
-  double stepsize2=1e1;
-  double stepsize3=1e1;
+  double stepsize=1e-4;
+  double stepsize2=1e0;
+  double stepsize3=1e0;
   double num_iter=3;
-  double num_iter2=6;
-  double num_iter3=6;
+  double num_iter2=3;
+  double num_iter3=3;
 
   // if(mIterationNumber%15==0){
   //   stepsize/=2;
@@ -1308,7 +1308,7 @@ bool PGOAgent::updateX_new(bool doOptimization) {
 
   // }
 
-  // consensus_step( stepsize,num_iter);
+  consensus_step( stepsize,num_iter);
   gradient_tracking_step(stepsize2,num_iter2);
   update_private_variable_step(stepsize3,num_iter3);
   double fOpt=mProblemPtr->f(X);
@@ -1482,10 +1482,10 @@ void PGOAgent::gradient_tracking_step(double stepsize,int num_iter){
   grad_prev=mProblemPtr->RieGrad(XPrev);
   grad=mProblemPtr->RieGrad(X);
   Matrix dgrad=grad-grad_prev;
-      // std::cout<<grad<<std::endl;
+      // std::cout<<dgrad<<std::endl;
   // int num_iter=8;
   double rau=1e-4;
-  double tau=0.1; 
+  double tau=0.01; 
   Matrix grad_delta;
   //go through seperator
   for(auto seperator:localSharedPoseIDs){
@@ -1505,17 +1505,15 @@ void PGOAgent::gradient_tracking_step(double stepsize,int num_iter){
 
     // H_local[seperator]=H_sum+grad_delta;
     H_local[seperator]=H_sum+grad_delta;
-
+    // std::cout<<"grad"<< H_local[seperator]<<std::endl;
     Matrix var= X.block(0, index * (d + 1), r, d + 1);
     Matrix R=var.block(0,0,3,3);
     Vector t=var.col(3);  
     Matrix gradR=H_local[seperator].block(0,0,3,3);
-    // std::cout<<"gradR"<<expmap(-stepsize*gradR)<<std::endl;
     Vector gradt=H_local[seperator].col(3); 
 
     //select stepsize
-    double norm_r=gradR.norm();
-    double norm_t=gradt.norm();
+
     double stepsize_r,stepsize_t;
     stepsize_r=stepsize_t=stepsize;
     bool flag_r,flag_t,flag_update_r,flag_update_t;
@@ -1524,6 +1522,8 @@ void PGOAgent::gradient_tracking_step(double stepsize,int num_iter){
     double fx=mProblemPtr->f(X);
     for(int j=0;j<num_iter;j++){
       if(flag_r){
+        // std::cout<<"gradR"<<expmap(-stepsize_r*R.transpose()*gradR)<<std::endl;
+        
         Xtemp.block(0,index*(d+1),r,d)=R*expmap(-stepsize_r*R.transpose()*gradR);
         double f_newx=mProblemPtr->f(Xtemp);
         // std::cout<<"delta_f for R: "<<fx-f_newx<<std::endl;
@@ -1568,7 +1568,7 @@ void PGOAgent::gradient_tracking_step(double stepsize,int num_iter){
   //go through shared_neighbor
   for(unsigned i=0;i<shared_neighbor.size();i++){
     unsigned index=num_poses()+i;
-    grad_delta = grad.block(0, index * (d + 1), r, d + 1),-grad_prev.block(0, index * (d + 1), r, d + 1);
+    grad_delta = grad.block(0, index * (d + 1), r, d + 1)-grad_prev.block(0, index * (d + 1), r, d + 1);
     Matrix neighbor_H=H_neighbor[shared_neighbor[i]];
     // H_local[shared_neighbor[i]]=(neighbor_H+H_local[shared_neighbor[i]])/2+grad_delta;
     //does not include myself
@@ -1642,7 +1642,7 @@ void PGOAgent::gradient_tracking_step(double stepsize,int num_iter){
 void PGOAgent:: update_private_variable_step(double stepsize, int num_iter){
   std::cout<<"cost before: "<<2*mProblemPtr->f(X)<<std::endl;
   double rau=1e-4;
-  double tau=0.1; 
+  double tau=0.01; 
   grad=mProblemPtr->RieGrad(X);
 
   for(unsigned index=0;index<num_poses();index++){

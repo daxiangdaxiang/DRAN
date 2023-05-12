@@ -1308,19 +1308,10 @@ bool PGOAgent::updateX_new(bool doOptimization) {
 
   // }
 
-  // consensus_step( stepsize,num_iter);
-  // gradient_tracking_step(stepsize2,num_iter2);
-  // update_private_variable_step(stepsize3,num_iter3);
-  QuadraticOptimizer optimizer(mProblemPtr);
-  optimizer.setVerbose(true);
-  optimizer.setAlgorithm(ROPTALG::RGD);
-  optimizer.setGradientDescentStepsize(1e-3);
-
-  // std::cout<<"gradient descent"<<std::endl;
-  X=optimizer.optimize(XPrev);
+  consensus_step( stepsize,num_iter);
+  gradient_tracking_step(stepsize2,num_iter2);
+  update_private_variable_step(stepsize3,num_iter3);
   double fOpt=mProblemPtr->f(X);
-  std::cout<<"gradient descent cost "<<2*fOpt<<std::endl;
-
   double gradNormOpt = mProblemPtr->RieGradNorm(X);
   printf("for robot:%u df: %f, gn0: %f, gn1: %f, df/gn0: %f\n",mID,
            fInit - fOpt,
@@ -1350,6 +1341,7 @@ void PGOAgent::consensus_step(double stepsize, int num_iter){
   std::cout<<"cost before: "<<2*mProblemPtr->f(X)<<std::endl;
   //go through seperator
 
+  double rau=1e-4;
   double tau=0.1; 
   for(const auto seperator:localSharedPoseIDs){
     unsigned index=seperator.second;
@@ -1372,42 +1364,42 @@ void PGOAgent::consensus_step(double stepsize, int num_iter){
 
     double dis_r,dis_t,dis_newr,dis_newt,stepsize_r,stepsize_t;
     stepsize_r=stepsize_t=stepsize;
-    stepsize_t*=100;
     bool flag_r,flag_t,flag_update;
     flag_r=flag_t=flag_update=true;
-    get_distance_r(R,X_seperator[seperator],dis_r);
-    get_distance_t(t,X_seperator[seperator],dis_t);
+    // get_distance_r(R,X_seperator[seperator],dis_r);
+    // get_distance_t(t,X_seperator[seperator],dis_t);
+    // std::cout<<"norm_r: "<<norm_r<<", norm_t: "<<norm_t<<std::endl;
 
     // select stepsize
-    for(int j=0;j<num_iter;j++){
-      if(flag_r){
-        get_distance_r(R*expmap(stepsize_r*gradR),X_seperator[seperator],dis_newr);
-        // std::cout<<"delta_r: "<<dis_r-dis_newr<<std::endl;
+    // for(int j=0;j<num_iter;j++){
+    //   if(flag_r){
+    //     get_distance_r(R*expmap(stepsize_r*gradR),X_seperator[seperator],dis_newr);
+    //     // std::cout<<"delta_r: "<<dis_r-dis_newr<<std::endl;
 
-        // if(dis_r-dis_newr<stepsize_r*rau*norm_r*norm_r)
-        if(dis_r-dis_newr<0)
+    //     // if(dis_r-dis_newr<stepsize_r*rau*norm_r*norm_r)
+    //     if(dis_r-dis_newr<0)
 
-          stepsize_r*=tau;
-        else
-          flag_r=false;
-      }
-      if(flag_t){
-        get_distance_t(t+stepsize_t*gradt,X_seperator[seperator],dis_newt);
-        // std::cout<<"delta_t: "<<dis_t-dis_newt<<std::endl;
-        // if(dis_t-dis_newt<stepsize_t*rau*norm_t*norm_t)
-        if(dis_t-dis_newt<0)
+    //       stepsize_r*=tau;
+    //     else
+    //       flag_r=false;
+    //   }
+    //   if(flag_t){
+    //     get_distance_t(t+stepsize_t*gradt,X_seperator[seperator],dis_newt);
+    //     // std::cout<<"delta_t: "<<dis_t-dis_newt<<std::endl;
+    //     // if(dis_t-dis_newt<stepsize_t*rau*norm_t*norm_t)
+    //     if(dis_t-dis_newt<0)
 
-          stepsize_t*=tau;
-        else
-          flag_t=false;
-      }
-      if(!flag_r&&!flag_t)
-        break;
-      if(j==num_iter-1){
-        std::cout<<"fail to update stepsize"<<std::endl;
-        flag_update=false;
-        }
-    }
+    //       stepsize_t*=tau;
+    //     else
+    //       flag_t=false;
+    //   }
+    //   if(!flag_r&&!flag_t)
+    //     break;
+    //   if(j==num_iter-1){
+    //     // std::cout<<"fail to update stepsize"<<std::endl;
+    //     flag_update=false;
+    //     }
+    // }
     // std::cout<<"change sep"<<std::endl<<gradR<<std::endl<<gradt<<std::endl;
     if(flag_update){
     X.block(0,index*(d+1),r,3)=(R*expmap(stepsize_r*gradR)).eval();
@@ -1439,35 +1431,35 @@ void PGOAgent::consensus_step(double stepsize, int num_iter){
     dis_t=0.5*(t-neighbor_var.col(3)).norm();
     // std::cout<<"norm_r: "<<norm_r<<", norm_t: "<<norm_t<<std::endl;
 
-    for(int j=0;j<num_iter;j++){
-      if(flag_r){
-        Matrix new_R=R*expmap(stepsize_r*gradR);
-        dis_newr=-0.5*(logmap(new_R.transpose()*neighbor_var.block(0,0,3,3))*logmap(new_R.transpose()*neighbor_var.block(0,0,3,3))).trace();
-        // std::cout<<"delta_r: "<<dis_r-dis_newr<<std::endl;
-        // if(dis_r-dis_newr<stepsize_r*rau*norm_r*norm_r)
-        if(dis_r-dis_newr<0)
+    // for(int j=0;j<num_iter;j++){
+    //   if(flag_r){
+    //     Matrix new_R=R*expmap(stepsize_r*gradR);
+    //     dis_newr=-0.5*(logmap(new_R.transpose()*neighbor_var.block(0,0,3,3))*logmap(new_R.transpose()*neighbor_var.block(0,0,3,3))).trace();
+    //     // std::cout<<"delta_r: "<<dis_r-dis_newr<<std::endl;
+    //     // if(dis_r-dis_newr<stepsize_r*rau*norm_r*norm_r)
+    //     if(dis_r-dis_newr<0)
 
-          stepsize_r*=tau;
-        else
-          flag_r=false;
-      }
-      if(flag_t){
-        dis_newt=0.5*(t+stepsize_t*gradt-neighbor_var.col(3)).norm();        
-        // std::cout<<"delta_t: "<<dis_t-dis_newt<<std::endl;
-        // if(dis_t-dis_newt<stepsize_t*rau*norm_t*norm_t)
-        if(dis_t-dis_newt<0)
+    //       stepsize_r*=tau;
+    //     else
+    //       flag_r=false;
+    //   }
+    //   if(flag_t){
+    //     dis_newt=0.5*(t+stepsize_t*gradt-neighbor_var.col(3)).norm();        
+    //     // std::cout<<"delta_t: "<<dis_t-dis_newt<<std::endl;
+    //     // if(dis_t-dis_newt<stepsize_t*rau*norm_t*norm_t)
+    //     if(dis_t-dis_newt<0)
 
-          stepsize_t*=tau;
-        else
-          flag_t=false;
-      }
-      if(!flag_r&&!flag_t)
-        break;
-      if(j==num_iter-1){
-        // std::cout<<"fail to update stepsize"<<std::endl;
-        flag_update=false;
-        }
-    }
+    //       stepsize_t*=tau;
+    //     else
+    //       flag_t=false;
+    //   }
+    //   if(!flag_r&&!flag_t)
+    //     break;
+    //   if(j==num_iter-1){
+    //     // std::cout<<"fail to update stepsize"<<std::endl;
+    //     flag_update=false;
+    //     }
+    // }
     //change
     if(flag_update){
     X.block(0,index*(d+1),r,3)=(R*expmap(stepsize_r*gradR)).eval();

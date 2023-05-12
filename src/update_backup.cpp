@@ -489,6 +489,7 @@ void PGOAgent::update_sharedH(unsigned sharedID, const std::map<PoseID,Matrix>&s
     if (neighborSharedPoseIDs.find(nID) != neighborSharedPoseIDs.end()){
       H_neighbor[nID]=var;
       // std::cout<<"neighbor: "<<nID.first<<","<<nID.second<<std::endl<<var<<std::endl;
+      
     }
     else{
       if(localSharedPoseIDs.find(nID)!= localSharedPoseIDs.end()){
@@ -1280,12 +1281,12 @@ bool PGOAgent::updateX_new(bool doOptimization) {
   // Starting solution
   Matrix XInit;
   XPrev= X;
-  double stepsize=1e-4;
-  double stepsize2=1e4;
-  double stepsize3=1e0;
+  double stepsize=1e1;
+  double stepsize2=1e2;
+  double stepsize3=1e2;
   double num_iter=3;
-  double num_iter2=10;
-  double num_iter3=3;
+  double num_iter2=6;
+  double num_iter3=6;
 
   // if(mIterationNumber%15==0){
   //   stepsize/=2;
@@ -1309,18 +1310,9 @@ bool PGOAgent::updateX_new(bool doOptimization) {
   // }
 
   // consensus_step( stepsize,num_iter);
-  // gradient_tracking_step(stepsize2,num_iter2);
-  // update_private_variable_step(stepsize3,num_iter3);
-  QuadraticOptimizer optimizer(mProblemPtr);
-  optimizer.setVerbose(true);
-  optimizer.setAlgorithm(ROPTALG::RGD);
-  optimizer.setGradientDescentStepsize(1e-3);
-
-  // std::cout<<"gradient descent"<<std::endl;
-  X=optimizer.optimize(XPrev);
+  gradient_tracking_step(stepsize2,num_iter2);
+  update_private_variable_step(stepsize3,num_iter3);
   double fOpt=mProblemPtr->f(X);
-  std::cout<<"gradient descent cost "<<2*fOpt<<std::endl;
-
   double gradNormOpt = mProblemPtr->RieGradNorm(X);
   printf("for robot:%u df: %f, gn0: %f, gn1: %f, df/gn0: %f\n",mID,
            fInit - fOpt,
@@ -1345,138 +1337,98 @@ void PGOAgent:: get_distance_t(const Vector &t,const std::map<unsigned,Matrix> &
   }
   return;
 }
-// void PGOAgent::consensus_adaptive_stepsize(Matrix grad,Matrix)
 void PGOAgent::consensus_step(double stepsize, int num_iter){
   std::cout<<"cost before: "<<2*mProblemPtr->f(X)<<std::endl;
   //go through seperator
+  int iter=1;
+  double tau=0.1;
+  double stepsize_r,stepsize_t;
+  stepsize_r=stepsize_t=stepsize;
+  
+  for(int cnt=0;cnt<iter;cnt++){
 
-  double tau=0.1; 
   for(const auto seperator:localSharedPoseIDs){
     unsigned index=seperator.second;
     Matrix gradR=Matrix::Zero(3,3);
     Vector gradt=Vector::Zero(3);
     Matrix var;
     var = X.block(0, index * (d + 1), r, d + 1);
-    // std::cout<<var<<std::endl<<"compare"<<std::endl;
 
     Matrix R=var.block(0,0,3,3);
     Vector t=var.col(3);
-    // std::cout<<R<<std::endl;
-      // std::cout<<R.transpose()*neighbor_var.second.block(0,0,3,3)<<std::endl;
     for(const auto &neighbor_var:X_seperator[seperator]){
       gradR+=logmap(R.transpose()*neighbor_var.second.block(0,0,3,3));
       gradt+=(neighbor_var.second.col(3)-t);
     }
-    
-    //select stepsize
 
-    double dis_r,dis_t,dis_newr,dis_newt,stepsize_r,stepsize_t;
-    stepsize_r=stepsize_t=stepsize;
-    stepsize_t*=100;
+    double dis_r,dis_t,dis_newr,dis_newt;
     bool flag_r,flag_t,flag_update;
     flag_r=flag_t=flag_update=true;
     get_distance_r(R,X_seperator[seperator],dis_r);
     get_distance_t(t,X_seperator[seperator],dis_t);
 
-    // select stepsize
-    for(int j=0;j<num_iter;j++){
-      if(flag_r){
-        get_distance_r(R*expmap(stepsize_r*gradR),X_seperator[seperator],dis_newr);
-        // std::cout<<"delta_r: "<<dis_r-dis_newr<<std::endl;
+    get_distance_r(R*expmap(stepsize_r*gradR),X_seperator[seperator],dis_newr);
+    if(dis_r-dis_newr<0)
+      flag_r=false;
 
-        // if(dis_r-dis_newr<stepsize_r*rau*norm_r*norm_r)
-        if(dis_r-dis_newr<0)
-
-          stepsize_r*=tau;
-        else
-          flag_r=false;
-      }
-      if(flag_t){
-        get_distance_t(t+stepsize_t*gradt,X_seperator[seperator],dis_newt);
-        // std::cout<<"delta_t: "<<dis_t-dis_newt<<std::endl;
-        // if(dis_t-dis_newt<stepsize_t*rau*norm_t*norm_t)
-        if(dis_t-dis_newt<0)
-
-          stepsize_t*=tau;
-        else
-          flag_t=false;
-      }
-      if(!flag_r&&!flag_t)
-        break;
-      if(j==num_iter-1){
-        std::cout<<"fail to update stepsize"<<std::endl;
-        flag_update=false;
-        }
+    get_distance_t(t+stepsize_t*gradt,X_seperator[seperator],dis_newt);
+    if(dis_t-dis_newt<0)
+      flag_t=false;
+    
+    if(flag_r)
+      X.block(0,index*(d+1),r,3)=(R*expmap(stepsize_r*gradR)).eval();
+    // else
+      // std::cout<<"fail to update R"<<std::endl;
+    if(flag_t)
+      X.col(index*(d+1)+3)=(t+stepsize_t*gradt).eval();
+    // else
+    // std::cout<<"fail to update t"<<std::endl;
     }
-    // std::cout<<"change sep"<<std::endl<<gradR<<std::endl<<gradt<<std::endl;
-    if(flag_update){
-    X.block(0,index*(d+1),r,3)=(R*expmap(stepsize_r*gradR)).eval();
-    X.col(index*(d+1)+3)=(t+stepsize_t*gradt).eval();}
-        // std::cout<<R<<std::endl;
-  }
-  // std::cout<<"update seperator consensus done"<<std::endl;
+
   //go through shared_neighbor
-  for(unsigned i=0;i<shared_neighbor.size();i++){
-    unsigned index=num_poses()+i;
-    Matrix gradR=Matrix::Zero(3,3);
-    Vector gradt=Vector::Zero(3);
-    Matrix var = X.block(0, index * (d + 1), r, d + 1);
-    Matrix R=var.block(0,0,3,3);
-    Vector t=var.col(3);
-    Matrix neighbor_var=X_neighbor[shared_neighbor[i]];
-    gradR=logmap(R.transpose()*neighbor_var.block(0,0,3,3));
-    gradt+=(neighbor_var.col(3)-t);
-    // std::cout<<"change neighbor"<<std::endl<<expmap(gradR)<<std::endl<<gradt<<std::endl;
+    for(unsigned i=0;i<shared_neighbor.size();i++){
+      unsigned index=num_poses()+i;
+      Matrix gradR=Matrix::Zero(3,3);
+      Vector gradt=Vector::Zero(3);
+      Matrix var = X.block(0, index * (d + 1), r, d + 1);
+      Matrix R=var.block(0,0,3,3);
+      Vector t=var.col(3);
+      Matrix neighbor_var=X_neighbor[shared_neighbor[i]];
+      gradR=logmap(R.transpose()*neighbor_var.block(0,0,3,3));
+      gradt+=(neighbor_var.col(3)-t);
+      //select stepsize
 
-    //select stepsize
-    // double norm_r=gradR.norm();
-    // double norm_t=gradt.norm();
-    double dis_r,dis_t,dis_newr,dis_newt,stepsize_r,stepsize_t;
-    stepsize_r=stepsize_t=stepsize;
-    bool flag_r,flag_t,flag_update;
-    flag_r=flag_t=flag_update=true;
-    dis_r-=0.5*(logmap(R.transpose()*neighbor_var.block(0,0,3,3))*logmap(R.transpose()*neighbor_var.block(0,0,3,3))).trace();
-    dis_t=0.5*(t-neighbor_var.col(3)).norm();
-    // std::cout<<"norm_r: "<<norm_r<<", norm_t: "<<norm_t<<std::endl;
+      double dis_r,dis_t,dis_newr,dis_newt,stepsize_r,stepsize_t;
+      stepsize_r=stepsize_t=stepsize;
+      bool flag_r,flag_t,flag_update;
+      flag_r=flag_t=flag_update=true;
+      dis_r-=0.5*(logmap(R.transpose()*neighbor_var.block(0,0,3,3))*logmap(R.transpose()*neighbor_var.block(0,0,3,3))).trace();
+      dis_t=0.5*(t-neighbor_var.col(3)).norm();
+      Matrix new_R=R*expmap(stepsize_r*gradR);
 
-    for(int j=0;j<num_iter;j++){
-      if(flag_r){
-        Matrix new_R=R*expmap(stepsize_r*gradR);
-        dis_newr=-0.5*(logmap(new_R.transpose()*neighbor_var.block(0,0,3,3))*logmap(new_R.transpose()*neighbor_var.block(0,0,3,3))).trace();
-        // std::cout<<"delta_r: "<<dis_r-dis_newr<<std::endl;
-        // if(dis_r-dis_newr<stepsize_r*rau*norm_r*norm_r)
-        if(dis_r-dis_newr<0)
+      dis_newr=-0.5*(logmap(new_R.transpose()*neighbor_var.block(0,0,3,3))*logmap(new_R.transpose()*neighbor_var.block(0,0,3,3))).trace();
+      if(dis_r-dis_newr<0)
+        flag_r=false; 
+      
+      dis_newt=0.5*(t+stepsize_t*gradt-neighbor_var.col(3)).norm();        
+      if(dis_t-dis_newt<0)
+        flag_t=false;
 
-          stepsize_r*=tau;
-        else
-          flag_r=false;
-      }
-      if(flag_t){
-        dis_newt=0.5*(t+stepsize_t*gradt-neighbor_var.col(3)).norm();        
-        // std::cout<<"delta_t: "<<dis_t-dis_newt<<std::endl;
-        // if(dis_t-dis_newt<stepsize_t*rau*norm_t*norm_t)
-        if(dis_t-dis_newt<0)
+      if(flag_r)
+        X.block(0,index*(d+1),r,3)=(R*expmap(stepsize_r*gradR)).eval();
+      // else
+      //   std::cout<<"fail to update R"<<std::endl;
+      if(flag_t)
+        X.col(index*(d+1)+3)=(t+stepsize_t*gradt).eval();
+      // else
+      //   std::cout<<"fail to update t"<<std::endl;
 
-          stepsize_t*=tau;
-        else
-          flag_t=false;
-      }
-      if(!flag_r&&!flag_t)
-        break;
-      if(j==num_iter-1){
-        // std::cout<<"fail to update stepsize"<<std::endl;
-        flag_update=false;
-        }
-    }
-    //change
-    if(flag_update){
-    X.block(0,index*(d+1),r,3)=(R*expmap(stepsize_r*gradR)).eval();
-    X.col(index*(d+1)+3)=(t+stepsize_t*gradt).eval();
+      
   }
-        // dis2+=-0.5*(logmap(R.transpose()*neighbor_var.block(0,0,3,3))*logmap(R.transpose()*neighbor_var.block(0,0,3,3))).trace();
+  stepsize_r*=tau;
+  stepsize_t*=tau;
 
   }
-  
   std::cout<<"cost after: "<<2*mProblemPtr->f(X)<<std::endl;
 // std::cout<<"consensus distance before: "<<dis<<std::endl;
 
@@ -1485,263 +1437,150 @@ void PGOAgent::consensus_step(double stepsize, int num_iter){
 } 
 
 void PGOAgent::gradient_tracking_step(double stepsize,int num_iter){
-  std::cout<<"cost before: "<<2*mProblemPtr->f(X)<<std::endl;
+  double cost_before=2*mProblemPtr->f(X);
+  std::cout<<"cost before: "<<cost_before<<std::endl;
   grad_prev=mProblemPtr->RieGrad(XPrev);
   grad=mProblemPtr->RieGrad(X);
-  Matrix dgrad=grad-grad_prev;
-  // Matrix dgrad=grad-grad_prev;
-
-  // int num_iter=8;
-  double tau=0.1; 
+  int iter=20;
+  double tau=0.5;
+  double stepsize_r,stepsize_t;
+  stepsize_r=stepsize_t=stepsize;
   //go through seperator
-  for(auto seperator:localSharedPoseIDs){
-    unsigned index=seperator.second;
+  for(int cnt=0;cnt<iter;cnt++){
+    Matrix Xtemp=X; 
+    for(auto seperator:localSharedPoseIDs){
+      unsigned index=seperator.second;
       Matrix var= X.block(0, index * (d + 1), r, d + 1);
-    Matrix R=var.block(0,0,3,3);
-    Vector t=var.col(3);  
-    //grad
-    Matrix grad_delta=Matrix::Zero(3,4);
-    Matrix R_local=XPrev.block(0, index * (d + 1), d, d );
-    grad_delta.block(0,0,3,3) = grad.block(0, index * (d + 1), d, d )-R*R_local.transpose()*grad_prev.block(0, index * (d + 1), d, d );
-    grad_delta.col(3)=grad.col(index * (d + 1)+d)-grad_prev.col(index * (d + 1)+d);
-    // grad_delta = dgrad.block(0, index * (d + 1), r, d + 1);
-    // Matrix H_sum=H_local[seperator];
-    
-    //does not include myself
-    Matrix H_sum=Matrix::Zero(3,4);
+      Matrix R=var.block(0,0,3,3);
+      Vector t=var.col(3);  
+      Matrix grad_delta=Matrix::Zero(3,4);
+      Matrix R_local=XPrev.block(0, index * (d + 1), d, d );
+      grad_delta.block(0,0,3,3) = grad.block(0, index * (d + 1), d, d )-R*R_local.transpose()*grad_prev.block(0, index * (d + 1), d, d );
+      // grad_delta.block(0,0,3,3) = grad.block(0, index * (d + 1), d, d )-grad_prev.block(0, index * (d + 1), d, d );
+      
+      grad_delta.col(3)=grad.col(index * (d + 1)+d)-grad_prev.col(index * (d + 1)+d);
+      // std::cout<<"grad "<<std::endl<<grad.block(0, index * (d + 1), d, d )-R*R_local.transpose()*grad_prev.block(0, index * (d + 1), d, d )<<std::endl;
+      // std::cout<<"grad "<<std::endl<<grad_delta<<std::endl;
+      
+      
+      // Matrix H_sum=H_local[seperator];
+      //does not include myself
+      Matrix H_sum=Matrix::Zero(3,4);
+      
+      for(auto &neighbor_var:H_seperator[seperator]){
+        Matrix neighbor_R=X_seperator[seperator][neighbor_var.first].block(0,0,3,3);
+        // Matrix neighbor_R=neighbor_T.block(0,0,3,3);
+      // std::cout<<"grad "<<std::endl<<neighbor_var.second.block(0,0,3,3)<<std::endl;
 
-    for(auto &neighbor_var:H_seperator[seperator]){
-      // H_sum+=neighbor_var.second;
-      Matrix neighbor_R=X_seperator[seperator][neighbor_var.first].block(0,0,3,3);
-      // std::cout<<"H_grad"<<neighbor_R.transpose()*neighbor_var.second.block(0,0,3,3)<<std::endl;
         H_sum.block(0,0,3,3)+=R*neighbor_R.transpose()*neighbor_var.second.block(0,0,3,3);
         H_sum.col(3)+=neighbor_var.second.col(3);
-    }
-    // H_sum/=H_seperator[seperator].size()+1;
-    H_sum/=H_seperator[seperator].size();
+      }
+        H_sum/=H_seperator[seperator].size();
 
-    // H_local[seperator]=H_sum+grad_delta;
-    H_local[seperator]=H_sum+grad_delta;
-    // std::cout<<"grad"<< H_local[seperator]<<std::endl;
+      // H_local[seperator]=H_sum+grad_delta;
+      H_local[seperator]=H_sum+grad_delta;
+
+
+      Matrix gradR=H_local[seperator].block(0,0,3,3);
+      // std::cout<<"gradR"<<expmap(-stepsize*gradR)<<std::endl;
+      Vector gradt=H_local[seperator].col(3); 
+      // bool flag_r,flag_t,flag_update_r,flag_update_t;
+      // flag_r=flag_t=flag_update_r=flag_update_t=true;
+      Xtemp.block(0,index*(d+1),r,d)=R*expmap(-stepsize_r*R.transpose()*gradR);
+      Xtemp.col(index*(d+1)+d)=(t-stepsize_t*gradt);
+    }
+    //go through shared_neighbor
+    for(unsigned i=0;i<shared_neighbor.size();i++){
+      unsigned index=num_poses()+i;
+      Matrix grad_delta=Matrix::Zero(3,4);
+      Matrix var= X.block(0, index * (d + 1), r, d + 1);
+      Matrix R=var.block(0,0,r,d);
+      Vector t=var.col(d);  
+      // grad_delta = grad.block(0, index * (d + 1), r, d + 1),-grad_prev.block(0, index * (d + 1), r, d + 1);
+      Matrix R_local=XPrev.block(0, index * (d + 1), d, d );
+      grad_delta.block(0,0,3,3) = grad.block(0, index * (d + 1), d, d )-R*R_local.transpose()*grad_prev.block(0, index * (d + 1), d, d );
+      grad_delta.col(3)=grad.col(index * (d + 1)+d)-grad_prev.col(index * (d + 1)+d);
+      Matrix neighbor_R=X_neighbor[shared_neighbor[i]].block(0,0,3,3);
+      Matrix neighbor_H=H_neighbor[shared_neighbor[i]];
+      // H_local[shared_neighbor[i]]=(neighbor_H+H_local[shared_neighbor[i]])/2+grad_delta;
+      //does not include myself
+      H_local[shared_neighbor[i]].block(0,0,3,3)=R*neighbor_R.transpose()*neighbor_H.block(0,0,3,3);
+      H_local[shared_neighbor[i]].col(3)=neighbor_H.col(3);
+      
+      H_local[shared_neighbor[i]]+=grad_delta;
+    
+      Matrix gradR=H_local[shared_neighbor[i]].block(0,0,3,3);
+      Vector gradt=H_local[shared_neighbor[i]].col(3); 
+      Xtemp.block(0,index*(d+1),r,d)=R*expmap(-stepsize_r*R.transpose()*gradR);
+      Xtemp.col(index*(d+1)+d)=(t-stepsize_t*gradt);
+      }    
+
+      double cost_after=2*mProblemPtr->f(Xtemp);
+      if(cost_before<cost_after){
+        stepsize_r*=tau;
+        stepsize_t*=tau;
+        if(cnt==iter-1)
+        std::cout<<"fail to update gt"<<std::endl;
+          
+        }
+      else{
+        X=Xtemp;
+        std::cout<<"cost after: "<<cost_after<<std::endl;
+        break;
+      }
+
+
+    }
+
   
-    Matrix gradR=H_local[seperator].block(0,0,3,3);
-    Vector gradt=H_local[seperator].col(3); 
-
-    //select stepsize
-
-    double stepsize_r,stepsize_t;
-    stepsize_r=stepsize_t=stepsize;
-    bool flag_r,flag_t,flag_update_r,flag_update_t;
-    flag_r=flag_t=flag_update_r=flag_update_t=true;
-    Matrix Xtemp=X;
-    double fx=mProblemPtr->f(X);
-    for(int j=0;j<num_iter;j++){
-      if(flag_r){
-        // std::cout<<"gradR"<<R.transpose()*gradR<<std::endl;
-        
-        Xtemp.block(0,index*(d+1),r,d)=R*expmap(-stepsize_r*R.transpose()*gradR);
-        double f_newx=mProblemPtr->f(Xtemp);
-        // std::cout<<"delta_f for R: "<<fx-f_newx<<std::endl;
-
-        // if(fx-f_newx<stepsize_r*rau*norm_r*norm_r)
-        if(fx-f_newx<0)
-          stepsize_r*=tau;
-        else{
-          flag_r=false;
-          // std::cout<<"stepsize_r:"<<stepsize_r<<std::endl;
-          
-          }
-      }
-      if(!flag_r)
-        break;
-      if(j==num_iter-1){
-        // std::cout<<"fail to update stepsize_r:"<<index<<std::endl;
-        flag_update_r=false;
-        }
-    }
-    for(int j=0;j<num_iter;j++){
-      if(flag_t){
-        Xtemp.col(index*(d+1)+d)=(t-stepsize_t*gradt);
-        double f_newx=mProblemPtr->f(Xtemp);
-        // std::cout<<"delta_f for t: "<<fx-f_newx<<std::endl;
-        // if(fx-f_newx<stepsize_t*rau*norm_t*norm_t)
-        if(fx-f_newx<0)
-          stepsize_t*=tau;
-        else{
-        flag_t  =false;
-
-        // std::cout<<"stepsize_t:"<<stepsize_t<<std::endl;
-
-        }
-          
-      }
-      if(!flag_t)
-        break;
-      if(j==num_iter-1){
-        // std::cout<<"fail to update stepsize_t"<<index<<std::endl;
-        flag_update_r=false;
-        }
-    }
-    if(flag_update_r)
-      X.block(0,index*(d+1),r,d)=R*expmap(-stepsize_r*R.transpose()*gradR);
-    if(flag_update_t)
-      X.col(index*(d+1)+d)=(t-stepsize_t*gradt).eval();
-    // std::cout<<" shared seperator stepsize r: "<<stepsize_r<<" stepsize t: "<<stepsize_t<<std::endl;
-  }
-  //go through shared_neighbor
-  for(unsigned i=0;i<shared_neighbor.size();i++){
-    unsigned index=num_poses()+i;
-    Matrix grad_delta=Matrix::Zero(3,4);
-    Matrix var= X.block(0, index * (d + 1), r, d + 1);
-    Matrix R=var.block(0,0,r,d);
-    Vector t=var.col(d);  
-    grad_delta = grad.block(0, index * (d + 1), r, d + 1),-grad_prev.block(0, index * (d + 1), r, d + 1);
-    // Matrix neighbor_H=H_neighbor[shared_neighbor[i]];
-    // H_local[shared_neighbor[i]]=(neighbor_H+H_local[shared_neighbor[i]])/2+grad_delta;
-    //does not include myself
-    Matrix R_local=XPrev.block(0, index * (d + 1), d, d );
-    grad_delta.block(0,0,3,3) = grad.block(0, index * (d + 1), d, d )-R*R_local.transpose()*grad_prev.block(0, index * (d + 1), d, d );
-    // std::cout<<"delta_R "<<-R_local.transpose()*grad_prev.block(0, index * (d + 1), d, d )<<std::endl;
-    grad_delta.col(3)=grad.col(index * (d + 1)+d)-grad_prev.col(index * (d + 1)+d);
-    Matrix neighbor_R=X_neighbor[shared_neighbor[i]].block(0,0,3,3);
-    Matrix neighbor_H=H_neighbor[shared_neighbor[i]];
-    H_local[shared_neighbor[i]].block(0,0,3,3)=R*neighbor_R.transpose()*neighbor_H.block(0,0,3,3);
-    H_local[shared_neighbor[i]].col(3)=neighbor_H.col(3);
-    H_local[shared_neighbor[i]]+=grad_delta;
-    // H_local[shared_neighbor[i]]=neighbor_H+grad_delta;
-
-
-    Matrix gradR=H_local[shared_neighbor[i]].block(0,0,3,3);
-    Vector gradt=H_local[shared_neighbor[i]].col(3); 
-
-     //select stepsize
-
-    double stepsize_r,stepsize_t;
-    stepsize_r=stepsize_t=stepsize;
-    bool flag_r,flag_t,flag_update_r,flag_update_t;
-    flag_r=flag_t=flag_update_r=flag_update_t=true;
-    Matrix Xtemp=X;
-    double fx=mProblemPtr->f(X);
-    for(int j=0;j<num_iter;j++){
-      if(flag_r){
-        Xtemp.block(0,index*(d+1),r,d)=R*expmap(-stepsize_r*R.transpose()*gradR);
-        double f_newx=mProblemPtr->f(Xtemp);
-        // std::cout<<"delta_R "<<R.transpose()*gradR<<std::endl;
-
-        // if(fx-f_newx<stepsize_r*rau*norm_r*norm_r)
-        if(fx-f_newx<0)
-          stepsize_r*=tau;
-        else
-          flag_r=false;
-      }
-      if(!flag_r)
-        break;
-      if(j==num_iter-1){
-        // std::cout<<"fail to update stepsize_r"<<std::endl;
-        flag_update_r=false;
-        }
-    }
-    for(int j=0;j<num_iter;j++){
-      if(flag_t){
-        Xtemp.col(index*(d+1)+d)=(t-stepsize_t*gradt);
-        double f_newx=mProblemPtr->f(Xtemp);
-        // std::cout<<"delta_f for t: "<<fx-f_newx<<std::endl;
-        // if(fx-f_newx<stepsize_t*rau*norm_t*norm_t)
-        if(fx-f_newx<0)
-          stepsize_t*=tau;
-        else
-          flag_t=false;
-      }
-      if(!flag_t)
-        break;
-      if(j==num_iter-1){
-        // std::cout<<"fail to update stepsize_r"<<std::endl;
-        flag_update_r=false;
-        }
-    }
-
-    if(flag_update_r)
-      X.block(0,index*(d+1),r,d)=R*expmap(-stepsize_r*R.transpose()*gradR);
-    if(flag_update_t)
-      X.col(index*(d+1)+d)=(t-stepsize_t*gradt).eval();
-    // std::cout<<" shared neighbor stepsize r: "<<stepsize_r<<" stepsize t: "<<stepsize_t<<std::endl;
-
-  }
-  std::cout<<"cost after: "<<2*mProblemPtr->f(X)<<std::endl;
 
   std::cout<<"updating gradient tracking done"<<std::endl;
 
 }
 void PGOAgent:: update_private_variable_step(double stepsize, int num_iter){
-  std::cout<<"cost before: "<<2*mProblemPtr->f(X)<<std::endl;
-  double rau=1e-4;
-  double tau=0.01; 
+  double cost_before=2*mProblemPtr->f(X);
+  std::cout<<"cost before: "<<cost_before<<std::endl;
+
   grad=mProblemPtr->RieGrad(X);
+  int iter=20;  
+  double tau=0.5;
+  double stepsize_r,stepsize_t;
+  stepsize_r=stepsize_t=stepsize;
+  for(int cnt=0;cnt<iter;cnt++){
+    Matrix Xtemp=X; 
+    for(unsigned index=0;index<num_poses();index++){
+      if(localSharedPoseIDs.find(std::make_pair(mID,index))!=localSharedPoseIDs.end()){
+        // std::cout<<"skipping seperator"<<mID<<","<<index<<std::endl;
+        continue;}
+      Matrix var= X.block(0, index * (d + 1), r, d + 1);
+      Matrix R=var.block(0,0,r,d);
+      Vector t=var.col(d);  
+      Matrix gradR=grad.block(0, index * (d + 1), r, d );
+      Vector gradt=grad.col(index * (d + 1)+d);
 
-  for(unsigned index=0;index<num_poses();index++){
-    if(localSharedPoseIDs.find(std::make_pair(mID,index))!=localSharedPoseIDs.end()){
-      // std::cout<<"skipping seperator"<<mID<<","<<index<<std::endl;
-      continue;}
-    Matrix var= X.block(0, index * (d + 1), r, d + 1);
-    Matrix R=var.block(0,0,r,d);
-    Vector t=var.col(d);  
-    Matrix gradR=grad.block(0, index * (d + 1), r, d );
-    Vector gradt=grad.col(index * (d + 1)+d);
 
-     //select stepsize
-    double norm_r=gradR.norm();
-    double norm_t=gradt.norm();
-    double stepsize_r,stepsize_t;
-    stepsize_r=stepsize_t=stepsize;
-    bool flag_r,flag_t,flag_update_r,flag_update_t;
-    flag_r=flag_t=flag_update_r=flag_update_t=true;
-    Matrix Xtemp=X;
-    double fx=mProblemPtr->f(X);
-    for(int j=0;j<num_iter;j++){
-      if(flag_r){
-        Xtemp.block(0,index*(d+1),r,d)=R*expmap(-stepsize_r*R.transpose()*gradR);
-        double f_newx=mProblemPtr->f(Xtemp);
-        // std::cout<<"delta_f for R: "<<fx-f_newx<<std::endl;
+      bool flag_r,flag_t,flag_update_r,flag_update_t;
+      flag_r=flag_t=flag_update_r=flag_update_t=true;
+      Xtemp.block(0,index*(d+1),r,d)=R*expmap(-stepsize_r*R.transpose()*gradR);
+      Xtemp.col(index*(d+1)+d)=(t-stepsize_t*gradt);
 
-        // if(fx-f_newx<stepsize_r*rau*norm_r*norm_r)
-        if(fx-f_newx<0)
-          stepsize_r*=tau;
-        else
-          flag_r=false;
       }
-      if(!flag_r)
-        break;
-      if(j==num_iter-1){
-        // std::cout<<"fail to update stepsize_r"<<std::endl;
-        flag_update_r=false;
+      double cost_after=2*mProblemPtr->f(Xtemp);
+      if(cost_before<cost_after){
+        stepsize_r*=tau;
+        stepsize_t*=tau;
+        if(cnt==iter-1)
+        std::cout<<"fail to update private"<<std::endl;
+          
         }
-    }
-    for(int j=0;j<num_iter;j++){
-      if(flag_t){
-        Xtemp.col(index*(d+1)+d)=(t-stepsize_t*gradt);
-        double f_newx=mProblemPtr->f(Xtemp);
-        // std::cout<<"delta_f for t: "<<fx-f_newx<<std::endl;
-        // if(fx-f_newx<stepsize_t*rau*norm_t*norm_t)
-        if(fx-f_newx<0)
-          stepsize_t*=tau;
-        else
-          flag_t=false;
+      else{
+        X=Xtemp;
+        std::cout<<"cost after: "<<cost_after<<std::endl;
+        break;
       }
-      if(!flag_t)
-        break;
-      if(j==num_iter-1){
-        // std::cout<<"fail to update stepsize_t"<<std::endl;
-        flag_update_r=false;
-        }
-    }
-    if(flag_update_r)
-      X.block(0,index*(d+1),r,d)=R*expmap(-stepsize_r*R.transpose()*gradR);
-    if(flag_update_t)
-      X.col(index*(d+1)+d)=(t-stepsize_t*gradt).eval();
-
-    
+   
   }
-  std::cout<<"cost after: "<<2*mProblemPtr->f(X)<<std::endl;
+  // std::cout<<"cost after: "<<2*mProblemPtr->f(X)<<std::endl;
 
   std::cout<<"updating private variable done"<<std::endl;
 
