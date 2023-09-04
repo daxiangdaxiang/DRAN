@@ -604,7 +604,8 @@ class PGOAgent {
 
   // Initial iterate
   std::optional<Matrix> XInit;
-
+  Matrix X_private;
+  Matrix Y_shared;
 
 
   // Initial solution TInit = [R1 t1 ... Rn tn] in an arbitrary coordinate frame

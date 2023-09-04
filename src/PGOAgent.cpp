@@ -21,7 +21,6 @@
 
 using std::lock_guard;
 using std::unique_lock;
-using std::set;
 using std::thread;
 using std::vector;
 
@@ -1280,12 +1279,12 @@ bool PGOAgent::updateX_new(bool doOptimization) {
   // Starting solution
   Matrix XInit;
   XPrev= X;
-  double stepsize=1e-4;
-  double stepsize2=1e4;
-  double stepsize3=1e0;
-  double num_iter=3;
-  double num_iter2=10;
-  double num_iter3=3;
+  // double stepsize=1e-4;
+  // double stepsize2=1e4;
+  // double stepsize3=1e0;
+  // double num_iter=3;
+  // double num_iter2=10;
+  // double num_iter3=3;
 
   // if(mIterationNumber%15==0){
   //   stepsize/=2;
@@ -1351,7 +1350,7 @@ void PGOAgent::consensus_step(double stepsize, int num_iter){
   //go through seperator
 
   double tau=0.1; 
-  for(const auto seperator:localSharedPoseIDs){
+  for(const auto &seperator:localSharedPoseIDs){
     unsigned index=seperator.second;
     Matrix gradR=Matrix::Zero(3,3);
     Vector gradt=Vector::Zero(3);
@@ -1432,6 +1431,7 @@ void PGOAgent::consensus_step(double stepsize, int num_iter){
     // double norm_r=gradR.norm();
     // double norm_t=gradt.norm();
     double dis_r,dis_t,dis_newr,dis_newt,stepsize_r,stepsize_t;
+    dis_r=0;
     stepsize_r=stepsize_t=stepsize;
     bool flag_r,flag_t,flag_update;
     flag_r=flag_t=flag_update=true;
@@ -1674,7 +1674,7 @@ void PGOAgent::gradient_tracking_step(double stepsize,int num_iter){
 }
 void PGOAgent:: update_private_variable_step(double stepsize, int num_iter){
   std::cout<<"cost before: "<<2*mProblemPtr->f(X)<<std::endl;
-  double rau=1e-4;
+  // double rau=1e-4;
   double tau=0.01; 
   grad=mProblemPtr->RieGrad(X);
 
@@ -1689,8 +1689,8 @@ void PGOAgent:: update_private_variable_step(double stepsize, int num_iter){
     Vector gradt=grad.col(index * (d + 1)+d);
 
      //select stepsize
-    double norm_r=gradR.norm();
-    double norm_t=gradt.norm();
+    // double norm_r=gradR.norm();
+    // double norm_t=gradt.norm();
     double stepsize_r,stepsize_t;
     stepsize_r=stepsize_t=stepsize;
     bool flag_r,flag_t,flag_update_r,flag_update_t;
