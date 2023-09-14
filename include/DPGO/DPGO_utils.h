@@ -10,13 +10,14 @@
 
 #include <DPGO/DPGO_types.h>
 #include <DPGO/RelativeSEMeasurement.h>
-#include<cmath>
 #include <Eigen/Dense>
 #include <Eigen/SVD>
-
+#include <cmath>
+#include <set>
+#include <vector>
 // ROPTLIB includes
 #include "Manifolds/Stiefel/Stiefel.h"
-
+using std::set;
 namespace DPGO {
 /**
  * @brief Write a dense Eigen matrix to file
@@ -30,8 +31,8 @@ void writeMatrixToFile(const Matrix &M, const std::string &filename);
  * @param M
  * @param filename
  */
-void writeSparseMatrixToFile(const SparseMatrix &M, const std::string &filename);
-
+void writeSparseMatrixToFile(const SparseMatrix &M,
+                             const std::string &filename);
 
 Vector vee(Matrix S);
 Matrix expmap(const Matrix &S);
@@ -42,8 +43,6 @@ Helper function to read a dataset in .g2o format
 std::vector<RelativeSEMeasurement> read_g2o_file(const std::string &filename,
                                                  size_t &num_poses);
 
-SparseMatrix construct_consensus_ConnectionLaplacianSE(
-    const std::vector<RelativeSEMeasurement> &measurements,const std::vector<RelativeSEMeasurement> &shared_measurements,const std::vector<PoseID>neighbor_vec);
 /**
 Helper function to construct connection laplacian matrix in SE(d)
 */
@@ -51,9 +50,22 @@ void constructOrientedConnectionIncidenceMatrixSE(
     const std::vector<RelativeSEMeasurement> &measurements, SparseMatrix &AT,
     DiagonalMatrix &OmegaT);
 
-void construct_consensus_OrientedConnectionIncidenceMatrixSE(
-    const std::vector<RelativeSEMeasurement> &measurements,const std::vector<RelativeSEMeasurement> &shared_measurements,const std::vector<PoseID>neighbor_vec,
-    SparseMatrix &AT,
+void construct_whole_OrientedConnectionIncidenceMatrixSE(
+    const std::vector<RelativeSEMeasurement> &measurements,
+    const std::vector<RelativeSEMeasurement> &shared_measurements,
+    const std::set<PoseID> &neighborSharedPoseIDs, SparseMatrix &AT,
+    DiagonalMatrix &OmegaT);
+
+void construct_private_OrientedConnectionIncidenceMatrixSE(
+    const std::vector<RelativeSEMeasurement> &measurements,
+    const std::set<PoseID>&localprivatePoseIDs, SparseMatrix &AT,
+    DiagonalMatrix &OmegaT);
+
+void construct_shared_OrientedConnectionIncidenceMatrixSE(
+    const std::vector<RelativeSEMeasurement> &shared_shared_measurements,
+    const std::vector<RelativeSEMeasurement> &sharedLoopClosures,
+    const std::set<PoseID> &localSharedPoseIDs,
+    const std::set<PoseID> &neighborSharedPoseIDs, SparseMatrix &AT,
     DiagonalMatrix &OmegaT);
 
 /**
@@ -62,6 +74,20 @@ Helper function to construct connection laplacian matrix in SE(d)
 SparseMatrix constructConnectionLaplacianSE(
     const std::vector<RelativeSEMeasurement> &measurements);
 
+SparseMatrix construct_whole_ConnectionLaplacianSE(
+    const std::vector<RelativeSEMeasurement> &measurements,
+    const std::vector<RelativeSEMeasurement> &shared_measurements,
+    const std::set<PoseID> &neighborSharedPoseIDs);
+
+SparseMatrix construct_private_ConnectionLaplacianSE(
+    const std::vector<RelativeSEMeasurement> &measurements,
+    const std::set<PoseID>&localprivatePoseIDs);
+
+SparseMatrix construct_shared_ConnectionLaplacianSE(
+    const std::vector<RelativeSEMeasurement> &shared_shared_measurements,
+    const std::vector<RelativeSEMeasurement> &sharedLoopClosures,
+    const std::set<PoseID> &localSharedPoseIDs,
+    const std::set<PoseID> &neighborSharedPoseIDs);
 /**
 Given a vector of relative pose measurements, this function computes and returns
 the B matrices defined in equation (69) of the tech report
@@ -74,20 +100,24 @@ void constructBMatrices(const std::vector<RelativeSEMeasurement> &measurements,
  * @param dimension
  * @param num_poses
  * @param measurements
- * @return trajectory estimate in matrix form T = [R1 t1 ... Rn tn] in an arbitrary frame
+ * @return trajectory estimate in matrix form T = [R1 t1 ... Rn tn] in an
+ * arbitrary frame
  */
-Matrix chordalInitialization(size_t dimension,
-                             size_t num_poses,
-                             const std::vector<RelativeSEMeasurement> &measurements);
+Matrix
+chordalInitialization(size_t dimension, size_t num_poses,
+                      const std::vector<RelativeSEMeasurement> &measurements);
 
 /**
  * @brief Initialize local trajectory estimate from odometry
  * @param dimension
  * @param num_poses
  * @param odometry A vector of odometry measurement
- * @return trajectory estimate in matrix form T = [R1 t1 ... Rn tn] in an arbitrary frame
+ * @return trajectory estimate in matrix form T = [R1 t1 ... Rn tn] in an
+ * arbitrary frame
  */
-Matrix odometryInitialization(size_t dimension, size_t num_poses, const std::vector<RelativeSEMeasurement> &odometry);
+Matrix
+odometryInitialization(size_t dimension, size_t num_poses,
+                       const std::vector<RelativeSEMeasurement> &odometry);
 
 /**
 Given the measurement matrices B1 and B2 and a matrix R of rotational state
@@ -124,13 +154,13 @@ Matrix fixedStiefelVariable(unsigned d, unsigned r);
  * @param t2 translation of second pose
  * @return
  */
-double computeMeasurementError(const RelativeSEMeasurement &m,
-                               const Matrix &R1, const Matrix &t1,
-                               const Matrix &R2, const Matrix &t2);
+double computeMeasurementError(const RelativeSEMeasurement &m, const Matrix &R1,
+                               const Matrix &t1, const Matrix &R2,
+                               const Matrix &t2);
 
 /**
- * @brief Quantile of chi-squared distribution with given degrees of freedom at probability alpha.
- * Equivalent to chi2inv in Matlab.
+ * @brief Quantile of chi-squared distribution with given degrees of freedom at
+ * probability alpha. Equivalent to chi2inv in Matlab.
  * @param quantile
  * @param dof
  * @return
@@ -156,8 +186,7 @@ void checkRotationMatrix(const Matrix &R);
  * @param tVec
  * @param tau
  */
-void singleTranslationAveraging(Vector &tOpt,
-                                const std::vector<Vector> &tVec,
+void singleTranslationAveraging(Vector &tOpt, const std::vector<Vector> &tVec,
                                 const Vector &tau = Vector::Ones(0));
 
 /**
@@ -166,8 +195,7 @@ void singleTranslationAveraging(Vector &tOpt,
  * @param RVec
  * @param kappa
  */
-void singleRotationAveraging(Matrix &ROpt,
-                             const std::vector<Matrix> &RVec,
+void singleRotationAveraging(Matrix &ROpt, const std::vector<Matrix> &RVec,
                              const Vector &kappa = Vector::Ones(0));
 
 /**
@@ -218,6 +246,6 @@ void robustSinglePoseAveraging(Matrix &ROpt, Vector &tOpt,
                                const Vector &tau = Vector::Ones(0),
                                double errorThreshold = 0.1);
 
-}  // namespace DPGO
+} // namespace DPGO
 
 #endif

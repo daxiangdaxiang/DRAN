@@ -10,6 +10,7 @@
 using namespace std;
 using namespace ROPTLIB;
 
+
 namespace DPGO {
 LiftedSEVariable::LiftedSEVariable(int r, int d, int n) {
   StiefelVariable = new StieVariable(r, d);

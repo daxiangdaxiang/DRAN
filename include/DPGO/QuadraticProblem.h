@@ -61,6 +61,7 @@ class QuadraticProblem : public ROPTLIB::Problem {
    * @return
    */
   double f(const Matrix &Y) const;
+  double get_scondf(const Matrix &Y)const;
 
   /**
    * @brief Evaluate objective function
@@ -93,7 +94,6 @@ class QuadraticProblem : public ROPTLIB::Problem {
    */
   void PreConditioner(ROPTLIB::Variable *x, ROPTLIB::Vector *inVec,
                       ROPTLIB::Vector *outVec) const override;
-
   /**
    * @brief Compute the Riemannian gradient at Y (represented in matrix form)
    * @param Y current point on the manifold (matrix form)
@@ -127,6 +127,7 @@ class QuadraticProblem : public ROPTLIB::Problem {
   // ROPTLIB objects
   LiftedSEManifold *M;
 
+  LiftedSEManifold *singleM;
   // Preconditioning solver
   Eigen::CholmodDecomposition<SparseMatrix> solver;
 

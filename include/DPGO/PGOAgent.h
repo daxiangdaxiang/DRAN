@@ -8,9 +8,9 @@
 #ifndef PGOAGENT_H
 #define PGOAGENT_H
 
+#include <DPGO/DPGO_robust.h>
 #include <DPGO/DPGO_types.h>
 #include <DPGO/PGOLogger.h>
-#include <DPGO/DPGO_robust.h>
 #include <DPGO/QuadraticProblem.h>
 #include <DPGO/RelativeSEMeasurement.h>
 #include <DPGO/manifold/LiftedSEManifold.h>
@@ -20,12 +20,12 @@
 #include <Eigen/Dense>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
-#include <stdexcept>
-#include <optional>
 
 #include "Manifolds/Element.h"
 #include "Manifolds/Manifold.h"
@@ -87,7 +87,8 @@ struct PGOAgentParameters {
   // Warm start iterate during robust optimization
   bool robustOptWarmStart;
 
-  // Number of inner iterations to apply before updating measurement weights during robust optimization
+  // Number of inner iterations to apply before updating measurement weights
+  // during robust optimization
   unsigned robustOptInnerIters;
 
   // Minimum ratio of converged weights before terminating robust optimization
@@ -109,45 +110,52 @@ struct PGOAgentParameters {
   std::string logDirectory;
 
   // Default constructor
-  PGOAgentParameters(unsigned dIn,
-                     unsigned rIn,
-                     unsigned numRobotsIn = 1,
-                     ROPTALG algorithmIn = ROPTALG::RTR,
-                     bool accel = false,
+  PGOAgentParameters(unsigned dIn, unsigned rIn, unsigned numRobotsIn = 1,
+                     ROPTALG algorithmIn = ROPTALG::RTR, bool accel = false,
                      unsigned restartInt = 30,
                      RobustCostType costType = RobustCostType::L2,
                      RobustCostParameters costParams = RobustCostParameters(),
                      bool robust_opt_warm_start = true,
                      unsigned robust_opt_inner_iters = 30,
                      double robust_opt_min_convergence_ratio = 0.8,
-                     unsigned maxIters = 500,
-                     double changeTol = 5e-3,
-                     bool v = false,
-                     bool log = false,
-                     std::string logDir = "")
-      : d(dIn), r(rIn), numRobots(numRobotsIn),
-        algorithm(algorithmIn), multirobot_initialization(true),
-        acceleration(accel), restartInterval(restartInt),
-        robustCostType(costType), robustCostParams(costParams),
+                     unsigned maxIters = 500, double changeTol = 5e-3,
+                     bool v = false, bool log = false, std::string logDir = "")
+      : d(dIn),
+        r(rIn),
+        numRobots(numRobotsIn),
+        algorithm(algorithmIn),
+        multirobot_initialization(true),
+        acceleration(accel),
+        restartInterval(restartInt),
+        robustCostType(costType),
+        robustCostParams(costParams),
         robustOptWarmStart(robust_opt_warm_start),
         robustOptInnerIters(robust_opt_inner_iters),
         robustOptMinConvergenceRatio(robust_opt_min_convergence_ratio),
-        maxNumIters(maxIters), relChangeTol(changeTol),
-        verbose(v), logData(log), logDirectory(std::move(logDir)) {}
+        maxNumIters(maxIters),
+        relChangeTol(changeTol),
+        verbose(v),
+        logData(log),
+        logDirectory(std::move(logDir)) {}
 
-  inline friend std::ostream &operator<<(
-      std::ostream &os, const PGOAgentParameters &params) {
+  inline friend std::ostream &operator<<(std::ostream &os,
+                                         const PGOAgentParameters &params) {
     os << "PGOAgent parameters: " << std::endl;
     os << "Dimension: " << params.d << std::endl;
     os << "Relaxation rank: " << params.r << std::endl;
     os << "Number of robots: " << params.numRobots << std::endl;
-    os << "Use multi-robot initialization: " << params.multirobot_initialization << std::endl;
+    os << "Use multi-robot initialization: " << params.multirobot_initialization
+       << std::endl;
     os << "Use Nesterov acceleration: " << params.acceleration << std::endl;
     os << "Fixed restart interval: " << params.restartInterval << std::endl;
-    os << "Robust cost function: " << RobustCostNames[params.robustCostType] << std::endl;
-    os << "Robust optimization warm start: " << params.robustOptWarmStart << std::endl;
-    os << "Robust optimization inner iterations: " << params.robustOptInnerIters << std::endl;
-    os << "Robust optimization weight convergence min ratio: " << params.robustOptMinConvergenceRatio << std::endl;
+    os << "Robust cost function: " << RobustCostNames[params.robustCostType]
+       << std::endl;
+    os << "Robust optimization warm start: " << params.robustOptWarmStart
+       << std::endl;
+    os << "Robust optimization inner iterations: " << params.robustOptInnerIters
+       << std::endl;
+    os << "Robust optimization weight convergence min ratio: "
+       << params.robustOptMinConvergenceRatio << std::endl;
     os << "Local optimization algorithm: " << params.algorithm << std::endl;
     os << "Max iterations: " << params.maxNumIters << std::endl;
     os << "Relative change tol: " << params.relChangeTol << std::endl;
@@ -182,8 +190,7 @@ struct PGOAgentStatus {
   // Constructor
   explicit PGOAgentStatus(unsigned id,
                           PGOAgentState s = PGOAgentState::WAIT_FOR_DATA,
-                          unsigned instance = 0,
-                          unsigned iteration = 0,
+                          unsigned instance = 0, unsigned iteration = 0,
                           bool ready_to_terminate = false,
                           double relative_change = 0)
       : agentID(id),
@@ -193,8 +200,8 @@ struct PGOAgentStatus {
         readyToTerminate(ready_to_terminate),
         relativeChange(relative_change) {}
 
-  inline friend std::ostream &operator<<(
-      std::ostream &os, const PGOAgentStatus &status) {
+  inline friend std::ostream &operator<<(std::ostream &os,
+                                         const PGOAgentStatus &status) {
     os << "PGOAgent status: " << std::endl;
     os << "ID: " << status.agentID << std::endl;
     os << "State: " << status.state << std::endl;
@@ -215,13 +222,15 @@ class PGOAgent {
   ~PGOAgent();
 
   /**
-   * @brief Set the local pose graph of this robot, optionally with an initial trajectory estimate
+   * @brief Set the local pose graph of this robot, optionally with an initial
+   * trajectory estimate
    * @param inputOdometry : odometry edges of this robot
    * @param inputPrivateLoopClosures : internal loop closures of this robot
    * @param inputSharedLoopClosures share : loop closures with other robots
-   * @param TInit : optional trajectory estimate [R1 t1 ... Rn tn] in an arbitrary frame. If the  matrix is empty or
-   * if its dimension does not match the expected dimension, the value will be discarded and internal initialization
-   * will be used instead.
+   * @param TInit : optional trajectory estimate [R1 t1 ... Rn tn] in an
+   * arbitrary frame. If the  matrix is empty or if its dimension does not match
+   * the expected dimension, the value will be discarded and internal
+   * initialization will be used instead.
    */
   void setPoseGraph(
       const std::vector<RelativeSEMeasurement> &inputOdometry,
@@ -231,7 +240,8 @@ class PGOAgent {
 
   /**
    * @brief perform a single iteration
-   * @param doOptimization: if true, this robot is selected to perform local optimization at this iteration
+   * @param doOptimization: if true, this robot is selected to perform local
+   * optimization at this iteration
    */
   void iterate(bool doOptimization = true);
 
@@ -239,18 +249,18 @@ class PGOAgent {
   Reset this agent to have empty pose graph
   */
   virtual void reset();
-  
+
   /**
    * @brief Reset variables used in Nesterov acceleration
    */
   void initializeAcceleration();
 
   /**
-   * 
+   *
    * @brief new_added, return neighbor poseids by order
-   * 
+   *
    */
-  vector<PoseID> get_neighborid()const {return shared_neighbor;};
+  set<PoseID> get_neighborid() const { return neighborSharedPoseIDs; };
   /**
   Return ID of this robot
   */
@@ -258,13 +268,14 @@ class PGOAgent {
 
   /**
    * @brief new_added update shared variables
-   * 
-   * @param neighborID 
-   * @param poseDict 
+   *
+   * @param neighborID
+   * @param poseDict
    */
   void update_sharedX(unsigned neighborID, const PoseDict &poseDict);
 
-  void update_sharedH(unsigned sharedID, const std::map<PoseID,Matrix>&poseDict);
+  void update_sharedH(unsigned sharedID,
+                      const std::map<PoseID, Matrix> &poseDict);
   /**
   Return number of poses of this robot
   */
@@ -327,11 +338,13 @@ class PGOAgent {
 
   /**
    * @brief new_added optimization
-   * 
-   * @param doOptimization 
- 
+   *
+   * @param doOptimization
+
    */
   bool updateX_new(bool doOptimization);
+  void step1();
+  void step2();
   /**
   Get vector of neighbor robot IDs.
   */
@@ -364,11 +377,13 @@ class PGOAgent {
    * @param T
    * @return
    */
-  bool getNeighborPoseInGlobalFrame(unsigned neighborID, unsigned poseID, Matrix &T);
+  bool getNeighborPoseInGlobalFrame(unsigned neighborID, unsigned poseID,
+                                    Matrix &T);
 
   /**
    * @brief Get a single public pose of this robot.
-   * Note that currently, this method does not check that the requested pose is a public pose
+   * Note that currently, this method does not check that the requested pose is
+   * a public pose
    * @param index: index of the requested pose
    * @param Mout: actual value of the pose
    * @return true if the requested pose exists
@@ -392,26 +407,31 @@ class PGOAgent {
 
   /**
    * @brief new_added Get the Shared H object
-   * 
-   * @param map 
+   *
+   * @param map
 
    */
-  bool getShared_H(std::map<PoseID,Matrix> &map);
+  bool getShared_H(std::map<PoseID, Matrix> &map);
   /**
-   * @brief Get a map of all auxiliary variables associated with public poses of this robot
+   * @brief Get a map of all auxiliary variables associated with public poses of
+   * this robot
    * @param map
    * @return true if agent is initialized
    */
   bool getAuxSharedPoseDict(PoseDict &map);
 
   /**
-   * @brief Helper function to reset internal solution. Currently only for debugging.
+   * @brief Helper function to reset internal solution. Currently only for
+   * debugging.
    * @param Xin
    */
   void setX(const Matrix &Xin);
-
+  void set_whole_X();
+  void setX_private();
+  void setY_shared();
   /**
-   * @brief Helper function to get internal solution. Note that this method disregards whether the agent is initialized.
+   * @brief Helper function to get internal solution. Note that this method
+   * disregards whether the agent is initialized.
    * @param Mout
    * @return
    */
@@ -476,24 +496,30 @@ class PGOAgent {
   Matrix computeNeighborTransform(const PoseID &nID, const Matrix &var);
 
   /**
-   * @brief Compute a robust relative transform estimate between this robot and neighbor robot, using a two-stage method
-   * which first perform robust single rotation averaging, and then performs translation averaging on the inlier set.
+   * @brief Compute a robust relative transform estimate between this robot and
+   * neighbor robot, using a two-stage method which first perform robust single
+   * rotation averaging, and then performs translation averaging on the inlier
+   * set.
    * @param neighborID
    * @param poseDict
    * @return
    */
-  Matrix computeRobustNeighborTransformTwoStage(unsigned neighborID, const PoseDict &poseDict);
+  Matrix computeRobustNeighborTransformTwoStage(unsigned neighborID,
+                                                const PoseDict &poseDict);
 
   /**
-   * @brief Compute a robust relative transform estimate between this robot and neighbor robot, by solving a robust single
-   * pose averaging problem using GNC.
+   * @brief Compute a robust relative transform estimate between this robot and
+   * neighbor robot, by solving a robust single pose averaging problem using
+   * GNC.
    * @param neighborID
    * @param poseDict
    * @return
    */
-  Matrix computeRobustNeighborTransform(unsigned neighborID, const PoseDict &poseDict);
+  Matrix computeRobustNeighborTransform(unsigned neighborID,
+                                        const PoseDict &poseDict);
   /**
-   * @brief Initialize this robot's trajectory estimate in the global frame, using a list of public poses from a neighbor robot
+   * @brief Initialize this robot's trajectory estimate in the global frame,
+   * using a list of public poses from a neighbor robot
    * @param neighborID
    * @param poseIDs
    * @param vars
@@ -501,9 +527,9 @@ class PGOAgent {
   void initializeInGlobalFrame(unsigned neighborID, const PoseDict &poseDict);
 
   /**
- * @brief Update local copy of a neighbor agent's pose
- * @param neighborID the ID of the neighbor agent
- */
+   * @brief Update local copy of a neighbor agent's pose
+   * @param neighborID the ID of the neighbor agent
+   */
   void updateNeighborPoses(unsigned neighborID, const PoseDict &poseDict);
 
   /**
@@ -513,33 +539,19 @@ class PGOAgent {
   void updateAuxNeighborPoses(unsigned neighborID, const PoseDict &poseDict);
 
   /**
-   * @brief Perform local PGO using the standard L2 (least-squares) cost function
-   * @return trajectory estimate in matrix form T = [R1 t1 ... Rn tn] in an arbitrary frame
+   * @brief Perform local PGO using the standard L2 (least-squares) cost
+   * function
+   * @return trajectory estimate in matrix form T = [R1 t1 ... Rn tn] in an
+   * arbitrary frame
    */
   Matrix localPoseGraphOptimization();
 
-  /**
-   * @brief Get the seperator's neighbor robot id 
-   * 
-   */
-  set<unsigned>get_seperator_neighbors(unsigned seperator){
-    return seperator_neighbors[seperator];
-  }
-
-  /**
-   * @brief get neighbors seperator id
-   * 
-   */
- vector<unsigned>get_neighbor_seperators(PoseID neighbor){
-    return neighbor_seperators[neighbor];
-  }
   void testQ();
 
- 
-  std::map<PoseID,Matrix> get_X_neighbor(){ return X_neighbor;}
-  std::map<PoseID,std::map<unsigned,Matrix>> get_X_seperator(){return X_seperator;}
-
-
+  std::map<PoseID, Matrix> get_X_neighbor() { return X_neighbor; }
+  std::map<PoseID, std::map<unsigned, Matrix>> get_X_seperator() {
+    return X_seperator;
+  }
 
  protected:
   // The unique ID associated to this robot
@@ -568,6 +580,8 @@ class PGOAgent {
 
   // Pointer to optimization problem
   QuadraticProblem *mProblemPtr;
+  QuadraticProblem *private_mProblemPtr;
+  QuadraticProblem *shared_mProblemPtr;
 
   // Rate in Hz of the optimization loop (only used in asynchronous mode)
   double mRate{};
@@ -575,7 +589,8 @@ class PGOAgent {
   // Current PGO instance
   unsigned mInstanceNumber;
 
-  // Current global iteration counter (this is only meaningful in synchronous mode)
+  // Current global iteration counter (this is only meaningful in synchronous
+  // mode)
   unsigned mIterationNumber;
 
   // Total number of neighbor poses received
@@ -606,7 +621,8 @@ class PGOAgent {
   std::optional<Matrix> XInit;
   Matrix X_private;
   Matrix Y_shared;
-
+  Matrix RGrad_Y_shared_prev;
+  Matrix H_local;
 
   // Initial solution TInit = [R1 t1 ... Rn tn] in an arbitrary coordinate frame
   std::optional<Matrix> TLocalInit;
@@ -623,28 +639,30 @@ class PGOAgent {
   // Store private loop closures of this robot
   vector<RelativeSEMeasurement> privateLoopClosures;
 
+  vector<RelativeSEMeasurement> private_measurements;
+  vector<RelativeSEMeasurement> private_shared_measurements;
+  vector<RelativeSEMeasurement> shared_shared_measurements;
   // Store shared loop closure measurements
   vector<RelativeSEMeasurement> sharedLoopClosures;
 
   // This dictionary stores poses owned by other robots that is connected to
   // this robot by loop closure
   PoseDict neighborPoseDict;
-  vector<PoseID> shared_neighbor;
+  // vector<PoseID> shared_neighbor;
   // Store the set of public poses that need to be sent to other robots
   set<PoseID> localSharedPoseIDs;
-  
-  // std::map<unsigned int,vector<PoseID>> seperator_neighbors;
-  std::map<unsigned int,set<unsigned>> seperator_neighbors;
-  std::map<PoseID,vector<unsigned>> neighbor_seperators;
+  set<PoseID> SharedPoseIDs;
+  set<PoseID> localprivatePoseIDs;
 
-  std::map<PoseID,Matrix> H_local;
-  std::map<PoseID,Matrix> H_neighbor;
-  std::map<PoseID,std::map<unsigned,Matrix>> H_seperator;
-  std::map<PoseID,Matrix> X_grad;
-  //new_added store neighbor's variables
-  std::map<PoseID,Matrix> X_neighbor;
-  //new_added store seperator's variables
-  std::map<PoseID,std::map<unsigned,Matrix>> X_seperator;
+  // std::map<unsigned int,vector<PoseID>> seperator_neighbors;
+  std::map<unsigned int, set<unsigned>> seperator_neighbors;
+  bool gt_flag = 1;
+  std::map<PoseID, Matrix> H_neighbor;
+  std::map<PoseID, std::map<unsigned, Matrix>> H_seperator;
+  // new_added store neighbor's variables
+  std::map<PoseID, Matrix> X_neighbor;
+  // new_added store seperator's variables
+  std::map<PoseID, std::map<unsigned, Matrix>> X_seperator;
 
   // Store the set of public poses needed from other robots
   set<PoseID> neighborSharedPoseIDs;
@@ -689,38 +707,44 @@ class PGOAgent {
   */
   void constructQMatrix();
 
-
-/**
- * @brief new_added,Get the distance_r 
- * 
- */
-void get_distance_r(const Matrix &R,const std::map<unsigned,Matrix> &sep_neighbors,double &dis_r);
-void get_distance_t(const Vector &t,const std::map<unsigned,Matrix> &sep_neighbors,double &dis_t);
-
-
+  /**
+   * @brief new_added,Get the distance_r
+   *
+   */
+  void get_distance_r(const Matrix &R,
+                      const std::map<unsigned, Matrix> &sep_neighbors,
+                      double &dis_r);
+  void get_distance_t(const Vector &t,
+                      const std::map<unsigned, Matrix> &sep_neighbors,
+                      double &dis_t);
 
   /**
    * @brief new_added do riemanian consensus
-   * 
+   *
    */
-void consensus_step(double stepsize, int num_iter=5);
-/**
- * @brief new_added do gradient_tracking
- * 
- * @param stepsize 
- */
-void gradient_tracking_step(double stepsize,int num_iter=8);
-void  update_private_variable_step(double stepsize,int num_iter=8);
+  void consensus_step(double stepsize, int num_iter = 5);
+  /**
+   * @brief new_added do gradient_tracking
+   *
+   * @param stepsize
+   */
+  void gradient_tracking_step(double stepsize, int num_iter = 8);
+  void update_private_variable_step(double stepsize, int num_iter = 8);
 
-void construct_consensus_QMatrix();
+  void construct_whole_QMatrix();
+  void construct_private_QMatrix();
+  void construct_shared_QMatrix();
 
   /**
    * @brief Construct the cost matrix G in the local PGO problem
       f(X) = 0.5<Q, XtX> + <X, G>
-   * @param poseDict: a Map that contains the public pose values from the neighbors
+   * @param poseDict: a Map that contains the public pose values from the
+   neighbors
    * @return true if the data matrix is computed successfully
    */
   bool constructGMatrix(const PoseDict &poseDict);
+  bool construct_shared_GMatrix();
+  bool construct_private_GMatrix();
 
   /**
    * @brief initialize local trajectory estimate
@@ -734,7 +758,8 @@ void construct_consensus_QMatrix();
   void runOptimizationLoop();
 
   /**
-   * @brief Find and return any shared measurement with the specified neighbor pose
+   * @brief Find and return any shared measurement with the specified neighbor
+   * pose
    * @return
    */
   RelativeSEMeasurement &findSharedLoopClosureWithNeighbor(const PoseID &nID);
@@ -747,7 +772,8 @@ void construct_consensus_QMatrix();
    * @param dstPoseID
    * @return
    */
-  RelativeSEMeasurement &findSharedLoopClosure(const PoseID &srcID, const PoseID &dstID);
+  RelativeSEMeasurement &findSharedLoopClosure(const PoseID &srcID,
+                                               const PoseID &dstID);
 
   /**
    * @brief Return true if should update loop closure weights
@@ -761,11 +787,12 @@ void construct_consensus_QMatrix();
   void updateLoopClosuresWeights();
 
   /**
-   * @brief Compute the ratio of loop closure weights that have converged (assuming GNC_TLS)
+   * @brief Compute the ratio of loop closure weights that have converged
+   * (assuming GNC_TLS)
    * @return ratio
    */
   double computeConvergedLoopClosureRatio();
-  
+
  private:
   // Stores the auxiliary variables from neighbors (only used in acceleration)
   PoseDict neighborAuxPoseDict;
@@ -778,12 +805,15 @@ void construct_consensus_QMatrix();
 
   // Auxiliary variable used in acceleration
   Matrix Y;
-
+  Matrix YPrev;
   // Auxiliary variable used in acceleration
   Matrix V;
 
   // Save previous iteration (for restarting)
   Matrix XPrev;
+  Matrix X_private_Prev;
+  Matrix Y_shared_Prev;
+
   Matrix grad_prev;
   Matrix grad;
 
@@ -793,7 +823,8 @@ void construct_consensus_QMatrix();
 
   /**
    * @brief Update X variable
-   * @param doOptimization Whether this agent is selected to perform optimization
+   * @param doOptimization Whether this agent is selected to perform
+   * optimization
    * @param acceleration true to use acceleration
    * @return true if update is successful
    */
@@ -811,7 +842,9 @@ void construct_consensus_QMatrix();
    * @param measurements
    * @return
    */
-  static bool isDuplicateMeasurement(const RelativeSEMeasurement &m, const vector<RelativeSEMeasurement> &measurements);
+  static bool isDuplicateMeasurement(
+      const RelativeSEMeasurement &m,
+      const vector<RelativeSEMeasurement> &measurements);
 };
 
 }  // namespace DPGO

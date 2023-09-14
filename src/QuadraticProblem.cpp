@@ -7,6 +7,8 @@
 
 #include <DPGO/QuadraticProblem.h>
 #include <iostream>
+#include "DPGO/DPGO_types.h"
+#include "DPGO/manifold/LiftedSEVariable.h"
 
 using namespace std;
 
@@ -51,7 +53,11 @@ double QuadraticProblem::f(const Matrix &Y) const {
   assert((unsigned) Y.rows() == r);
   assert((unsigned) Y.cols() == (d + 1) * n);
   // returns 0.5 * (Y * Q * Y.transpose()).trace() + (Y * G.transpose()).trace()
+//  std::cout<<"first term: "<<0.5 * ((Y * mQ).cwiseProduct(Y)).sum()<<" second term: "<<(Y.cwiseProduct(mG)).sum()<<std::endl;
   return 0.5 * ((Y * mQ).cwiseProduct(Y)).sum() + (Y.cwiseProduct(mG)).sum();
+}
+double QuadraticProblem::get_scondf(const Matrix &Y)const{
+  return (Y.cwiseProduct(mG)).sum();
 }
 
 double QuadraticProblem::f(ROPTLIB::Variable *x) const {
@@ -96,6 +102,17 @@ Matrix QuadraticProblem::RieGrad(const Matrix &Y) const {
   return RGrad.getData();
 }
 
+// Matrix QuadraticProblem::vectransport(const Matrix &X,const Matrix &Y,const Matrix &xix){
+//   LiftedSEVector xGrad(r, d, 1);
+//   xGrad.setData(xix);
+//   LiftedSEVariable XVar(r, d, 1);
+//   XVar.setData(X);
+//   LiftedSEVariable YVar(r, d, 1);
+//   YVar.setData(Y);
+//   LiftedSEVector YGrad(r, d, 1);
+
+
+// }
 double QuadraticProblem::RieGradNorm(const Matrix &Y) const {
   return RieGrad(Y).norm();
 }

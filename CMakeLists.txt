@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.5)
 
 project(DPGO)
-
+SET(CMAKE_BUILD_TYPE "Debug")
 if(NOT CMAKE_BUILD_TYPE)
     # Options: Debug, Release, MinSizeRel, RelWithDebInfo
     message(STATUS "No build type selected, default to Release")
@@ -11,7 +11,9 @@ endif()
 
 message(STATUS "CXX compiler version: " ${CMAKE_CXX_COMPILER_VERSION})
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -march=native")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -pthread -O3")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -pthread -O0")
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -pthread -O3")
+
 
 include(GNUInstallDirs)
 set(DPGO_INSTALL_INCLUDEDIR ${CMAKE_INSTALL_INCLUDEDIR}/DPGO)

@@ -5,16 +5,24 @@
  * See LICENSE for the license information
  * -------------------------------------------------------------------------- */
 
-#include <DPGO/DPGO_utils.h>
 #include <DPGO/DPGO_robust.h>
+#include <DPGO/DPGO_utils.h>
+
 #include <Eigen/Geometry>
 #include <Eigen/SPQRSupport>
 #include <algorithm>
+#include <boost/math/distributions/chi_squared.hpp>
+#include <cassert>
+#include <cstddef>
 #include <fstream>
 #include <iostream>
 #include <random>
-#include <cassert>
-#include <boost/math/distributions/chi_squared.hpp>
+#include <set>
+#include <utility>
+#include <vector>
+
+#include "DPGO/DPGO_types.h"
+#include "DPGO/RelativeSEMeasurement.h"
 
 namespace DPGO {
 
@@ -25,12 +33,14 @@ void writeMatrixToFile(const Matrix &M, const std::string &filename) {
     printf("Cannot write to specified file: %s\n", filename.c_str());
     return;
   }
-  const static Eigen::IOFormat CSVFormat(Eigen::FullPrecision, Eigen::DontAlignCols, ", ", "\n");
+  const static Eigen::IOFormat CSVFormat(Eigen::FullPrecision,
+                                         Eigen::DontAlignCols, ", ", "\n");
   file << M.format(CSVFormat);
   file.close();
 }
 
-void writeSparseMatrixToFile(const SparseMatrix &M, const std::string &filename) {
+void writeSparseMatrixToFile(const SparseMatrix &M,
+                             const std::string &filename) {
   std::ofstream file;
   file.open(filename);
   if (!file.is_open()) {
@@ -105,7 +115,7 @@ std::vector<RelativeSEMeasurement> read_g2o_file(const std::string &filename,
 
       // Extract formatted output
       strstrm >> i >> j >> dx >> dy >> dtheta >> I11 >> I12 >> I13 >> I22 >>
-              I23 >> I33;
+          I23 >> I33;
 
       // Fill in elements of this measurement
 
@@ -143,8 +153,8 @@ std::vector<RelativeSEMeasurement> read_g2o_file(const std::string &filename,
 
       // Extract formatted output
       strstrm >> i >> j >> dx >> dy >> dz >> dqx >> dqy >> dqz >> dqw >> I11 >>
-              I12 >> I13 >> I14 >> I15 >> I16 >> I22 >> I23 >> I24 >> I25 >> I26 >>
-              I33 >> I34 >> I35 >> I36 >> I44 >> I45 >> I46 >> I55 >> I56 >> I66;
+          I12 >> I13 >> I14 >> I15 >> I16 >> I22 >> I23 >> I24 >> I25 >> I26 >>
+          I33 >> I34 >> I35 >> I36 >> I44 >> I45 >> I46 >> I55 >> I56 >> I66;
 
       // Fill in elements of the measurement
 
@@ -205,7 +215,7 @@ void constructOrientedConnectionIncidenceMatrixSE(
   size_t m;           // Number of measurements
   m = measurements.size();
   size_t n = 0;  // Number of poses
-  for (const RelativeSEMeasurement &meas: measurements) {
+  for (const RelativeSEMeasurement &meas : measurements) {
     if (n < meas.p1) n = meas.p1;
     if (n < meas.p2) n = meas.p2;
   }
@@ -250,7 +260,8 @@ void constructOrientedConnectionIncidenceMatrixSE(
     for (size_t r = 0; r < d + 1; r++) A.insert(j * dh + r, k * dh + r) = +1;
 
     /// Assign isotropic weights in diagonal matrix
-    for (size_t r = 0; r < d; r++) diagonal[k * dh + r] = meas.weight * meas.kappa;
+    for (size_t r = 0; r < d; r++)
+      diagonal[k * dh + r] = meas.weight * meas.kappa;
 
     diagonal[k * dh + d] = meas.weight * meas.tau;
   }
@@ -261,20 +272,21 @@ void constructOrientedConnectionIncidenceMatrixSE(
   OmegaT = Omega;
 }
 
-void construct_consensus_OrientedConnectionIncidenceMatrixSE(
-    const std::vector<RelativeSEMeasurement> &measurements,const std::vector<RelativeSEMeasurement> &shared_measurements,const std::vector<PoseID>neighbor_vec,
-    SparseMatrix &AT,
-    DiagonalMatrix &OmegaT){
+void construct_whole_OrientedConnectionIncidenceMatrixSE(
+    const std::vector<RelativeSEMeasurement> &measurements,
+    const std::vector<RelativeSEMeasurement> &shared_measurements,
+    const std::set<PoseID> &neighborSharedPoseIDs, SparseMatrix &AT,
+    DiagonalMatrix &OmegaT) {
   // Deduce graph dimensions from measurements
   size_t d;  // Dimension of Euclidean space
   d = (!measurements.empty() ? measurements[0].t.size() : 0);
   size_t dh = d + 1;  // Homogenized dimension of Euclidean space
   size_t m;           // Number of measurements
-  size_t id=measurements[0].r1;
+  size_t id = measurements[0].r1;
   // std::cout<<"my id: "<<id<<std::endl;
-  m = measurements.size()+shared_measurements.size();
+  m = measurements.size() + shared_measurements.size();
   size_t n = 0;  // Number of poses
-  for (const RelativeSEMeasurement &meas: measurements) {
+  for (const RelativeSEMeasurement &meas : measurements) {
     if (n < meas.p1) n = meas.p1;
     if (n < meas.p2) n = meas.p2;
   }
@@ -282,7 +294,7 @@ void construct_consensus_OrientedConnectionIncidenceMatrixSE(
   // n+=neighbor_vec.size();
   // Define connection incidence matrix dimensions
   // This is a [n x m] (dh x dh)-block matrix
-  size_t rows = (d + 1) * (n+neighbor_vec.size());
+  size_t rows = (d + 1) * (n + neighborSharedPoseIDs.size());
   size_t cols = (d + 1) * m;
 
   // We use faster ordered insertion, as suggested in
@@ -319,79 +331,306 @@ void construct_consensus_OrientedConnectionIncidenceMatrixSE(
     for (size_t r = 0; r < d + 1; r++) A.insert(j * dh + r, k * dh + r) = +1;
 
     /// Assign isotropic weights in diagonal matrix
-    for (size_t r = 0; r < d; r++) diagonal[k * dh + r] = meas.weight * meas.kappa;
+    for (size_t r = 0; r < d; r++)
+      diagonal[k * dh + r] = meas.weight * meas.kappa;
 
     diagonal[k * dh + d] = meas.weight * meas.tau;
   }
-  unsigned r1,r2;
+  unsigned r1, r2;
   for (size_t k = 0; k < shared_measurements.size(); k++) {
     const RelativeSEMeasurement &meas = shared_measurements[k];
-    r1=meas.r1;
+    r1 = meas.r1;
     i = meas.p1;
     j = meas.p2;
-    r2=meas.r2;
-    if(r1==id){
-    /// Assign SE(d) matrix to block leaving node i
-    /// AT(i,k) = -Tij (NOTE: NEGATIVE)
-    // Do it column-wise for speed
-    // Elements of rotation
+    r2 = meas.r2;
+    if (r1 == id) {
+      /// Assign SE(d) matrix to block leaving node i
+      /// AT(i,k) = -Tij (NOTE: NEGATIVE)
+      // Do it column-wise for speed
+      // Elements of rotation
       for (size_t c = 0; c < d; c++)
         for (size_t r = 0; r < d; r++)
-          A.insert(i * dh + r, (k+measurements.size()) * dh + c) = -meas.R(r, c);
+          A.insert(i * dh + r, (k + measurements.size()) * dh + c) =
+              -meas.R(r, c);
 
       // Elements of translation
       for (size_t r = 0; r < d; r++)
-        A.insert(i * dh + r, (k+measurements.size()) * dh + d) = -meas.t(r);
+        A.insert(i * dh + r, (k + measurements.size()) * dh + d) = -meas.t(r);
 
       // Additional 1 for homogeneization
-      A.insert(i * dh + d, (k+measurements.size()) * dh + d) = -1;
-      size_t index=0;
-      auto it = std::find(neighbor_vec.begin(), neighbor_vec.end(), std::make_pair(r2,j));
-      if (it != neighbor_vec.end()) {
-       index = std::distance(neighbor_vec.begin(), it);
-       
-      //  cout<<"robot"
+      A.insert(i * dh + d, (k + measurements.size()) * dh + d) = -1;
+      size_t index = 0;
+      auto it = neighborSharedPoseIDs.find(std::make_pair(r2, j));
+      if (it != neighborSharedPoseIDs.end()) {
+        index = std::distance(neighborSharedPoseIDs.begin(), it);
+        //  cout<<"robot"
       } else {
-          std::cout << "Target not found" << std::endl;
+        std::cout << "Target not found" << std::endl;
       }
       /// Assign (d+1)-identity matrix to block leaving node j
       /// AT(j,k) = +I (NOTE: POSITIVE)
-      for (size_t r = 0; r < d + 1; r++) A.insert((index+n) * dh + r, (k+measurements.size())  * dh + r) = +1;
+      for (size_t r = 0; r < d + 1; r++)
+        A.insert((index + n) * dh + r, (k + measurements.size()) * dh + r) = +1;
 
       /// Assign isotropic weights in diagonal matrix
-      for (size_t r = 0; r < d; r++) diagonal[(k+measurements.size())  * dh + r] = meas.weight * meas.kappa;
+      for (size_t r = 0; r < d; r++)
+        diagonal[(k + measurements.size()) * dh + r] = meas.weight * meas.kappa;
 
-      diagonal[(k+measurements.size())  * dh + d] = meas.weight * meas.tau;
-    }
-    else if(r2==id){
-      size_t index=0;
-      auto it = std::find(neighbor_vec.begin(), neighbor_vec.end(), std::make_pair(r1,i));
-      if (it != neighbor_vec.end()) {
-       index = std::distance(neighbor_vec.begin(), it);
-      //  std::cout<<"robot:"<<r2<<" id:"<<j<<" to robot:"<<r1<<" id:"<<i<<std::endl;
-      //  std::cout<<index<<std::endl;
+      diagonal[(k + measurements.size()) * dh + d] = meas.weight * meas.tau;
+    } else if (r2 == id) {
+      size_t index = 0;
+      auto it = neighborSharedPoseIDs.find(std::make_pair(r1, i));
+      if (it != neighborSharedPoseIDs.end()) {
+        index = std::distance(neighborSharedPoseIDs.begin(), it);
+
+        //  std::cout<<"robot:"<<r2<<" id:"<<j<<" to robot:"<<r1<<"
+        //  id:"<<i<<std::endl; std::cout<<index<<std::endl;
       } else {
-          std::cout << "Target not found" << std::endl;
+        std::cout << "Target not found" << std::endl;
       }
       for (size_t c = 0; c < d; c++)
         for (size_t r = 0; r < d; r++)
-          A.insert((index+n) * dh + r, (k+measurements.size()) * dh + c) = -meas.R(r, c);
+          A.insert((index + n) * dh + r, (k + measurements.size()) * dh + c) =
+              -meas.R(r, c);
 
       // Elements of translation
       for (size_t r = 0; r < d; r++)
-        A.insert((index+n) * dh + r, (k+measurements.size()) * dh + d) = -meas.t(r);
+        A.insert((index + n) * dh + r, (k + measurements.size()) * dh + d) =
+            -meas.t(r);
 
-      // Additional 1 for homogeneization 
-      A.insert((index+n) * dh + d, (k+measurements.size()) * dh + d) = -1;
-   
+      // Additional 1 for homogeneization
+      A.insert((index + n) * dh + d, (k + measurements.size()) * dh + d) = -1;
+
       /// Assign (d+1)-identity matrix to block leaving node j
       /// AT(j,k) = +I (NOTE: POSITIVE)
-      for (size_t r = 0; r < d + 1; r++) A.insert(j* dh + r, (k+measurements.size())  * dh + r) = +1;
+      for (size_t r = 0; r < d + 1; r++)
+        A.insert(j * dh + r, (k + measurements.size()) * dh + r) = +1;
 
       /// Assign isotropic weights in diagonal matrix
-      for (size_t r = 0; r < d; r++) diagonal[(k+measurements.size())  * dh + r] = meas.weight * meas.kappa;
+      for (size_t r = 0; r < d; r++)
+        diagonal[(k + measurements.size()) * dh + r] = meas.weight * meas.kappa;
 
-      diagonal[(k+measurements.size())  * dh + d] = meas.weight * meas.tau;
+      diagonal[(k + measurements.size()) * dh + d] = meas.weight * meas.tau;
+    }
+  }
+  A.makeCompressed();
+
+  AT = A;
+  OmegaT = Omega;
+}
+void construct_private_OrientedConnectionIncidenceMatrixSE(
+    const std::vector<RelativeSEMeasurement> &measurements,
+    const std::set<PoseID> &localprivatePoseIDs, SparseMatrix &AT,
+    DiagonalMatrix &OmegaT) {
+  // Deduce graph dimensions from measurements
+  size_t d;  // Dimension of Euclidean space
+  d = (!measurements.empty() ? measurements[0].t.size() : 0);
+  size_t dh = d + 1;  // Homogenized dimension of Euclidean space
+  size_t m;           // Number of measurements
+  // size_t id = measurements[0].r1;
+  // std::cout<<"my id: "<<id<<std::endl;
+  m = measurements.size();
+  size_t n = localprivatePoseIDs.size();  // Number of poses
+
+  // Define connection incidence matrix dimensions
+  // This is a [n x m] (dh x dh)-block matrix
+  size_t rows = (d + 1) * n;
+  size_t cols = (d + 1) * m;
+  Eigen::SparseMatrix<double, Eigen::ColMajor> A(rows, cols);
+  A.reserve(Eigen::VectorXi::Constant(cols, 8));
+  DiagonalMatrix Omega(cols);  // One block per measurement: (d+1)*m
+  DiagonalMatrix::DiagonalVectorType &diagonal = Omega.diagonal();
+  unsigned int i, j;
+  for (size_t k = 0; k < measurements.size(); k++) {
+    const RelativeSEMeasurement &meas = measurements[k];
+    i = meas.p1;
+    j = meas.p2;
+    auto it = localprivatePoseIDs.find(std::make_pair(meas.r1, i));
+    size_t index_i = 0;
+    if (it != localprivatePoseIDs.end())
+      index_i = std::distance(localprivatePoseIDs.begin(), it);
+    for (size_t c = 0; c < d; c++)
+      for (size_t r = 0; r < d; r++)
+        A.insert(index_i * dh + r, k * dh + c) = -meas.R(r, c);
+    // Elements of translation
+    for (size_t r = 0; r < d; r++)
+      A.insert(index_i * dh + r, k * dh + d) = -meas.t(r);
+    // Additional 1 for homogeneizationa
+    A.insert(index_i * dh + d, k * dh + d) = -1;
+    it = localprivatePoseIDs.find(std::make_pair(meas.r2, j));
+    size_t index_j = 0;
+    if (it != localprivatePoseIDs.end())
+      index_j = std::distance(localprivatePoseIDs.begin(), it);
+    for (size_t r = 0; r < d + 1; r++)
+      A.insert(index_j * dh + r, k * dh + r) = +1;
+    for (size_t r = 0; r < d; r++)
+      diagonal[k * dh + r] = meas.weight * meas.kappa;
+
+    diagonal[k * dh + d] = meas.weight * meas.tau;
+  }
+  A.makeCompressed();
+  AT = A;
+  OmegaT = Omega;
+}
+void construct_shared_OrientedConnectionIncidenceMatrixSE(
+    const std::vector<RelativeSEMeasurement> &shared_shared_measurements,
+    const std::vector<RelativeSEMeasurement> &sharedLoopClosures,
+    const std::set<PoseID> &localSharedPoseIDs,
+    const std::set<PoseID> &neighborSharedPoseIDs, SparseMatrix &AT,
+    DiagonalMatrix &OmegaT) {
+  size_t d;
+  d = (!shared_shared_measurements.empty()
+           ? shared_shared_measurements[0].t.size()
+           : 0);
+  size_t dh = d + 1;
+  size_t m;
+  m = shared_shared_measurements.size() + sharedLoopClosures.size();
+  size_t n = localSharedPoseIDs.size() +
+             neighborSharedPoseIDs.size();  // Number of poses
+  size_t id = shared_shared_measurements[0].r1;
+
+  size_t rows = (d + 1) * n;
+  size_t cols = (d + 1) * m;
+  Eigen::SparseMatrix<double, Eigen::ColMajor> A(rows, cols);
+  A.reserve(Eigen::VectorXi::Constant(cols, 8));
+  DiagonalMatrix Omega(cols);  // One block per measurement: (d+1)*m
+  DiagonalMatrix::DiagonalVectorType &diagonal = Omega.diagonal();
+  unsigned int i, j;
+  for (size_t k = 0; k < shared_shared_measurements.size(); k++) {
+    const RelativeSEMeasurement &meas = shared_shared_measurements[k];
+    i = meas.p1;
+    j = meas.p2;
+    auto it = localSharedPoseIDs.find(std::make_pair(id, i));
+    size_t index_i = 0;
+    if (it != localSharedPoseIDs.end())
+      index_i = std::distance(localSharedPoseIDs.begin(), it);
+    else
+      std::cout << "share share Target not found" << std::endl;
+    for (size_t c = 0; c < d; c++)
+      for (size_t r = 0; r < d; r++)
+        A.insert(index_i * dh + r, k * dh + c) = -meas.R(r, c);
+
+    // Elements of translation
+    for (size_t r = 0; r < d; r++)
+      A.insert(index_i * dh + r, k * dh + d) = -meas.t(r);
+
+    // Additional 1 for homogeneizationa
+    A.insert(index_i * dh + d, k * dh + d) = -1;
+
+    size_t index_j = 0;
+    it = localSharedPoseIDs.find(std::make_pair(id, j));
+    if (it != localSharedPoseIDs.end())
+      index_j = std::distance(localSharedPoseIDs.begin(), it);
+    else
+      std::cout << "share share Target not found" << std::endl;
+    for (size_t r = 0; r < d + 1; r++)
+      A.insert(index_j * dh + r, k * dh + r) = +1;
+    for (size_t r = 0; r < d; r++)
+      diagonal[k * dh + r] = meas.weight * meas.kappa;
+
+    diagonal[k * dh + d] = meas.weight * meas.tau;
+  }
+  unsigned r1, r2;
+  for (size_t k = 0; k < sharedLoopClosures.size(); k++) {
+    const RelativeSEMeasurement &meas = sharedLoopClosures[k];
+    r1 = meas.r1;
+    i = meas.p1;
+    j = meas.p2;
+    r2 = meas.r2;
+    if (r1 == id) {
+      auto it = localSharedPoseIDs.find(std::make_pair(id, i));
+      size_t index_i = 0;
+      if (it != localSharedPoseIDs.end())
+        index_i = std::distance(localSharedPoseIDs.begin(), it);
+      else
+        std::cout << id << ":" << i << " Target not found" << std::endl;
+      /// Assign SE(d) matrix to block leaving node i
+      /// AT(i,k) = -Tij (NOTE: NEGATIVE)
+      // Do it column-wise for speed
+      // Elements of rotation
+      for (size_t c = 0; c < d; c++)
+        for (size_t r = 0; r < d; r++)
+          A.insert(index_i * dh + r,
+                   (k + shared_shared_measurements.size()) * dh + c) =
+              -meas.R(r, c);
+
+      // Elements of translation
+      for (size_t r = 0; r < d; r++)
+        A.insert(index_i * dh + r,
+                 (k + shared_shared_measurements.size()) * dh + d) = -meas.t(r);
+
+      // Additional 1 for homogeneization
+      A.insert(index_i * dh + d,
+               (k + shared_shared_measurements.size()) * dh + d) = -1;
+      size_t index_j = 0;
+      it = neighborSharedPoseIDs.find(std::make_pair(r2, j));
+      if (it != neighborSharedPoseIDs.end())
+        index_j = std::distance(neighborSharedPoseIDs.begin(), it);
+      //  cout<<"robot"
+      else
+        std::cout << "Target not found" << std::endl;
+
+      /// Assign (d+1)-identity matrix to block leaving node j
+      /// AT(j,k) = +I (NOTE: POSITIVE)
+      for (size_t r = 0; r < d + 1; r++)
+        A.insert((index_j + localSharedPoseIDs.size()) * dh + r,
+                 (k + shared_shared_measurements.size()) * dh + r) = +1;
+
+      /// Assign isotropic weights in diagonal matrix
+      for (size_t r = 0; r < d; r++)
+        diagonal[(k + shared_shared_measurements.size()) * dh + r] =
+            meas.weight * meas.kappa;
+      diagonal[(k + shared_shared_measurements.size()) * dh + d] =
+          meas.weight * meas.tau;
+    }
+
+    else if (r2 == id) {
+      size_t index_i = 0;
+      auto it = neighborSharedPoseIDs.find(std::make_pair(r1, i));
+      if (it != neighborSharedPoseIDs.end())
+        index_i = std::distance(neighborSharedPoseIDs.begin(), it);
+      else
+        std::cout << "Target not found" << std::endl;
+      
+      /// Assign SE(d) matrix to block leaving node i
+      /// AT(i,k) = -Tij (NOTE: NEGATIVE)
+      // Do it column-wise for speed
+      // Elements of rotation
+      for (size_t c = 0; c < d; c++)
+        for (size_t r = 0; r < d; r++)
+          A.insert((index_i+localSharedPoseIDs.size()) * dh + r,
+                   (k + shared_shared_measurements.size()) * dh + c) =
+              -meas.R(r, c);
+
+      // Elements of translation
+      for (size_t r = 0; r < d; r++)
+        A.insert((index_i+localSharedPoseIDs.size()) * dh + r,
+                 (k + shared_shared_measurements.size()) * dh + d) = -meas.t(r);
+
+      // Additional 1 for homogeneization
+      A.insert((index_i+localSharedPoseIDs.size()) * dh + d,
+               (k + shared_shared_measurements.size()) * dh + d) = -1;
+
+      // auto it = localSharedPoseIDs.find(std::make_pair(id, j));
+      size_t index_j = 0;
+      it=localSharedPoseIDs.find(std::make_pair(id, j));
+      if (it != localSharedPoseIDs.end())
+        index_j = std::distance(localSharedPoseIDs.begin(), it);
+      else
+        std::cout << "Target not found" << std::endl;
+
+      /// Assign (d+1)-identity matrix to block leaving node j
+      /// AT(j,k) = +I (NOTE: POSITIVE)
+      for (size_t r = 0; r < d + 1; r++)
+        A.insert(index_j * dh + r,
+                 (k + shared_shared_measurements.size()) * dh + r) = +1;
+
+      /// Assign isotropic weights in diagonal matrix
+      for (size_t r = 0; r < d; r++)
+        diagonal[(k + shared_shared_measurements.size()) * dh + r] =
+            meas.weight * meas.kappa;
+      diagonal[(k + shared_shared_measurements.size()) * dh + d] =
+          meas.weight * meas.tau;
     }
   }
   A.makeCompressed();
@@ -406,58 +645,79 @@ SparseMatrix constructConnectionLaplacianSE(
   constructOrientedConnectionIncidenceMatrixSE(measurements, AT, OmegaT);
   return AT * OmegaT * AT.transpose();
 }
-SparseMatrix construct_consensus_ConnectionLaplacianSE(
-    const std::vector<RelativeSEMeasurement> &measurements,const std::vector<RelativeSEMeasurement> &shared_measurements,const std::vector<PoseID> neighbor_vec) {
+SparseMatrix construct_whole_ConnectionLaplacianSE(
+    const std::vector<RelativeSEMeasurement> &measurements,
+    const std::vector<RelativeSEMeasurement> &shared_measurements,
+    const std::set<PoseID> &neighborSharedPoseIDs) {
   SparseMatrix AT;
   DiagonalMatrix OmegaT;
-  construct_consensus_OrientedConnectionIncidenceMatrixSE(measurements,shared_measurements,neighbor_vec, AT, OmegaT);
-  // std::cout<<AT<<std::endl;
-    //  for (int i = 0; i < AT.rows(); ++i) {
-    //     for (int j = 0; j < AT.cols(); ++j) {
-    //         std::cout<<std::setw(10)<< AT.coeff(i, j)<<" ";
-    //     }
-    //     std::cout<<std::endl;
-    //     }
+  construct_whole_OrientedConnectionIncidenceMatrixSE(
+      measurements, shared_measurements, neighborSharedPoseIDs, AT, OmegaT);
+
   return AT * OmegaT * AT.transpose();
 }
- Matrix logmap(Matrix R){
-      Matrix log=Matrix::Zero(3,3);
-      double w=(R.trace()-1)*0.5;
-      double theta=std::acos(std::max(-1.0, std::min(1.0, w)));
-      // std::cout<<"theta="<<theta<<std::endl;
-      if(theta==0)
-        return log;
-      else
-        log=0.5*theta*(R-R.transpose())/std::sin(theta);
-      return log;
-  }
-  Vector vee(Matrix S){
-    if (S(2,1) == -S(1,2) && S(0,2) == -S(2,0) && S(1,0) == -S(0,1)) {
-        return Eigen::Vector3d(S(2,1), S(0,2), S(1,0));
-    } else {
-        throw std::runtime_error("Error in vee(): input matrix is not skew-symmetric");
-    }
+
+SparseMatrix construct_private_ConnectionLaplacianSE(
+    const std::vector<RelativeSEMeasurement> &private_measurements,
+    const std::set<PoseID> &localprivatePoseIDs) {
+  SparseMatrix AT;
+  DiagonalMatrix OmegaT;
+  construct_private_OrientedConnectionIncidenceMatrixSE(
+      private_measurements, localprivatePoseIDs, AT, OmegaT);
+  return AT * OmegaT * AT.transpose();
 }
-  Matrix expmap(const Matrix &S){
-    // Vector omega=vee(S);
-    // double w=omega.norm();
-    
-    Matrix ExpS=Matrix::Zero(3,3);
-    Matrix Sq=S.transpose()*S;
-    double a=sqrt(0.5*Sq.trace());
-    // std::cout<<"a: "<<a<<std::endl;
+SparseMatrix construct_shared_ConnectionLaplacianSE(
+    const std::vector<RelativeSEMeasurement> &shared_shared_measurements,
+    const std::vector<RelativeSEMeasurement> &sharedLoopClosures,
+    const std::set<PoseID> &localSharedPoseIDs,
+    const std::set<PoseID> &neighborSharedPoseIDs) {
+  SparseMatrix AT;
+  DiagonalMatrix OmegaT;
+  construct_shared_OrientedConnectionIncidenceMatrixSE(
+      shared_shared_measurements, sharedLoopClosures, localSharedPoseIDs,
+      neighborSharedPoseIDs, AT, OmegaT);
+  return AT * OmegaT * AT.transpose();
+}
 
-    if(a==0)
-      ExpS=Eigen::Matrix3d::Identity();
-    else
-      
-      ExpS=Eigen::Matrix3d::Identity()+sin(a)*S/a+(1-cos(a))*S*S/(a*a);
-    // std::cout<<"exps: "<<std::endl<<ExpS<<std::endl;
-    return ExpS;
-
+Matrix logmap(Matrix R) {
+  Matrix log = Matrix::Zero(3, 3);
+  double w = (R.trace() - 1) * 0.5;
+  double theta = std::acos(std::max(-1.0, std::min(1.0, w)));
+  // std::cout<<"theta="<<theta<<std::endl;
+  if (theta < 1e-8)
+    return log;
+  else
+    log = 0.5 * theta * (R - R.transpose()) / std::sin(theta);
+  return log;
+}
+Vector vee(Matrix S) {
+  if (S(2, 1) == -S(1, 2) && S(0, 2) == -S(2, 0) && S(1, 0) == -S(0, 1)) {
+    return Eigen::Vector3d(S(2, 1), S(0, 2), S(1, 0));
+  } else {
+    throw std::runtime_error(
+        "Error in vee(): input matrix is not skew-symmetric");
   }
-void constructBMatrices(const std::vector<RelativeSEMeasurement> &measurements, SparseMatrix &B1,
-                        SparseMatrix &B2, SparseMatrix &B3) {
+}
+Matrix expmap(const Matrix &S) {
+  // Vector omega=vee(S);
+  // double w=omega.norm();
+
+  Matrix ExpS = Matrix::Zero(3, 3);
+  Matrix Sq = S.transpose() * S;
+  double a = sqrt(0.5 * Sq.trace());
+  // std::cout<<"a: "<<a<<std::endl;
+
+  if (a < 1e-12)
+    ExpS = Eigen::Matrix3d::Identity();
+  else
+
+    ExpS = Eigen::Matrix3d::Identity() + sin(a) * S / a +
+           (1 - cos(a)) * S * S / (a * a);
+  // std::cout<<"exps: "<<std::endl<<ExpS<<std::endl;
+  return ExpS;
+}
+void constructBMatrices(const std::vector<RelativeSEMeasurement> &measurements,
+                        SparseMatrix &B1, SparseMatrix &B2, SparseMatrix &B3) {
   // Clear input matrices
   B1.setZero();
   B2.setZero();
@@ -472,7 +732,7 @@ void constructBMatrices(const std::vector<RelativeSEMeasurement> &measurements, 
   size_t d2 = d * d;
   size_t d3 = d * d * d;
 
-  size_t i, j; // Indices for the tail and head of the given measurement
+  size_t i, j;  // Indices for the tail and head of the given measurement
   double sqrttau;
   size_t max_pair;
 
@@ -486,18 +746,18 @@ void constructBMatrices(const std::vector<RelativeSEMeasurement> &measurements, 
 
     // Block corresponding to the tail of the measurement
     for (size_t l = 0; l < d; l++) {
-      triplets.emplace_back(e * d + l, i * d + l,
-                            -sqrttau); // Diagonal element corresponding to tail
+      triplets.emplace_back(
+          e * d + l, i * d + l,
+          -sqrttau);  // Diagonal element corresponding to tail
       triplets.emplace_back(e * d + l, j * d + l,
-                            sqrttau); // Diagonal element corresponding to head
+                            sqrttau);  // Diagonal element corresponding to head
     }
 
     // Keep track of the number of poses we've seen
     max_pair = std::max<size_t>(i, j);
-    if (max_pair > num_poses)
-      num_poses = max_pair;
+    if (max_pair > num_poses) num_poses = max_pair;
   }
-  num_poses++; // Account for zero-based indexing
+  num_poses++;  // Account for zero-based indexing
 
   B1.resize(d * measurements.size(), d * num_poses);
   B1.setFromTriplets(triplets.begin(), triplets.end());
@@ -528,8 +788,8 @@ void constructBMatrices(const std::vector<RelativeSEMeasurement> &measurements, 
 
     for (size_t r = 0; r < d; r++)
       for (size_t c = 0; c < d; c++) {
-        i = measurements[e].p1; // Tail of measurement
-        j = measurements[e].p2; // Head of measurement
+        i = measurements[e].p1;  // Tail of measurement
+        j = measurements[e].p2;  // Head of measurement
 
         // Representation of the -sqrt(kappa) * Rt(i,j) \otimes I_d block
         for (size_t l = 0; l < d; l++)
@@ -555,7 +815,7 @@ Matrix chordalInitialization(
   size_t d = (!measurements.empty() ? measurements[0].t.size() : 0);
   unsigned int d2 = d * d;
   assert(dimension == d);
-  assert(num_poses == (unsigned) B3.cols() / d2);
+  assert(num_poses == (unsigned)B3.cols() / d2);
 
   SparseMatrix B3red = B3.rightCols((num_poses - 1) * d2);
   B3red.makeCompressed();  // Must be in compressed format to use
@@ -581,8 +841,8 @@ Matrix chordalInitialization(
 
   // Recover translation
   Matrix tchordal = recoverTranslations(B1, B2, Rchordal);
-  assert((unsigned) tchordal.rows() == dimension);
-  assert((unsigned) tchordal.cols() == num_poses);
+  assert((unsigned)tchordal.rows() == dimension);
+  assert((unsigned)tchordal.cols() == num_poses);
 
   // Assemble full pose
   Matrix Tchordal(d, num_poses * (d + 1));
@@ -594,7 +854,9 @@ Matrix chordalInitialization(
   return Tchordal;
 }
 
-Matrix odometryInitialization(size_t dimension, size_t num_poses, const std::vector<RelativeSEMeasurement> &odometry) {
+Matrix odometryInitialization(
+    size_t dimension, size_t num_poses,
+    const std::vector<RelativeSEMeasurement> &odometry) {
   size_t d = dimension;
   size_t n = num_poses;
 
@@ -623,7 +885,7 @@ Matrix recoverTranslations(const SparseMatrix &B1, const SparseMatrix &B2,
   unsigned int n = R.cols() / d;
 
   // Vectorization of R matrix
-  Eigen::Map<Eigen::VectorXd> rvec((double *) R.data(), d * d * n);
+  Eigen::Map<Eigen::VectorXd> rvec((double *)R.data(), d * d * n);
 
   // Form the matrix comprised of the right (n-1) block columns of B1
   SparseMatrix B1red = B1.rightCols(d * (n - 1));
@@ -674,12 +936,12 @@ Matrix fixedStiefelVariable(unsigned d, unsigned r) {
   std::srand(1);
   ROPTLIB::StieVariable var(r, d);
   var.RandInManifold();
-  return Eigen::Map<Matrix>((double *) var.ObtainReadData(), r, d);
+  return Eigen::Map<Matrix>((double *)var.ObtainReadData(), r, d);
 }
 
-double computeMeasurementError(const RelativeSEMeasurement &m,
-                               const Matrix &R1, const Matrix &t1,
-                               const Matrix &R2, const Matrix &t2) {
+double computeMeasurementError(const RelativeSEMeasurement &m, const Matrix &R1,
+                               const Matrix &t1, const Matrix &R2,
+                               const Matrix &t2) {
   double rotationErrorSq = (R1 * m.R - R2).squaredNorm();
   double translationErrorSq = (t2 - t1 - R1 * m.t).squaredNorm();
   return m.kappa * rotationErrorSq + m.tau * translationErrorSq;
@@ -690,9 +952,7 @@ double chi2inv(double quantile, size_t dof) {
   return boost::math::quantile(chi2, quantile);
 }
 
-double angular2ChordalSO3(double rad) {
-  return 2 * sqrt(2) * sin(rad / 2);
-}
+double angular2ChordalSO3(double rad) { return 2 * sqrt(2) * sin(rad / 2); }
 
 void checkRotationMatrix(const Matrix &R) {
   const auto d = R.rows();
@@ -701,10 +961,9 @@ void checkRotationMatrix(const Matrix &R) {
   assert((R.transpose() * R - Matrix::Identity(d, d)).norm() < 1e-8);
 }
 
-void singleTranslationAveraging(Vector &tOpt,
-                                const std::vector<Vector> &tVec,
+void singleTranslationAveraging(Vector &tOpt, const std::vector<Vector> &tVec,
                                 const Vector &tau) {
-  const int n = (int) tVec.size();
+  const int n = (int)tVec.size();
   assert(n > 0);
   const auto d = tVec[0].rows();
   Vector tau_ = Vector::Ones(n);
@@ -720,10 +979,9 @@ void singleTranslationAveraging(Vector &tOpt,
   tOpt = s / w;
 }
 
-void singleRotationAveraging(Matrix &ROpt,
-                             const std::vector<Matrix> &RVec,
+void singleRotationAveraging(Matrix &ROpt, const std::vector<Matrix> &RVec,
                              const Vector &kappa) {
-  const int n = (int) RVec.size();
+  const int n = (int)RVec.size();
   assert(n > 0);
   const auto d = RVec[0].rows();
   Vector kappa_ = Vector::Ones(n);
@@ -739,8 +997,7 @@ void singleRotationAveraging(Matrix &ROpt,
 
 void singlePoseAveraging(Matrix &ROpt, Vector &tOpt,
                          const std::vector<Matrix> &RVec,
-                         const std::vector<Vector> &tVec,
-                         const Vector &kappa,
+                         const std::vector<Vector> &tVec, const Vector &kappa,
                          const Vector &tau) {
   assert(!RVec.empty());
   assert(!tVec.empty());
@@ -753,17 +1010,16 @@ void singlePoseAveraging(Matrix &ROpt, Vector &tOpt,
 void robustSingleRotationAveraging(Matrix &ROpt,
                                    std::vector<size_t> &inlierIndices,
                                    const std::vector<Matrix> &RVec,
-                                   const Vector &kappa,
-                                   double errorThreshold) {
+                                   const Vector &kappa, double errorThreshold) {
   const double w_tol = 1e-8;
-  const int n = (int) RVec.size();
+  const int n = (int)RVec.size();
   assert(n > 0);
   Vector kappa_ = Vector::Ones(n);
   Vector weights_ = Vector::Ones(n);
   if (kappa.rows() == n) {
     kappa_ = kappa;
   }
-  for (const auto &Ri: RVec) {
+  for (const auto &Ri : RVec) {
     checkRotationMatrix(Ri);
   }
   // Initialize estimate
@@ -777,7 +1033,8 @@ void robustSingleRotationAveraging(Matrix &ROpt,
   double barcSq = barc * barc;
   double muInit = barcSq / (2 * rSqVec.maxCoeff() - barcSq);
   muInit = std::min(muInit, 1e-5);
-  // Negative values of initial mu corresponds to small residual errors. In this case skip applying GNC.
+  // Negative values of initial mu corresponds to small residual errors. In this
+  // case skip applying GNC.
   if (muInit > 0) {
     RobustCostParameters params;
     params.GNCBarc = barc;
@@ -818,11 +1075,10 @@ void robustSinglePoseAveraging(Matrix &ROpt, Vector &tOpt,
                                std::vector<size_t> &inlierIndices,
                                const std::vector<Matrix> &RVec,
                                const std::vector<Vector> &tVec,
-                               const Vector &kappa,
-                               const Vector &tau,
+                               const Vector &kappa, const Vector &tau,
                                double errorThreshold) {
   const double w_tol = 1e-8;
-  const int n = (int) RVec.size();
+  const int n = (int)RVec.size();
   assert(n > 0);
   assert(tVec.size() == n);
   Vector kappa_ = 10000 * Vector::Ones(n);
@@ -834,26 +1090,24 @@ void robustSinglePoseAveraging(Matrix &ROpt, Vector &tOpt,
   if (tau.rows() == n) {
     tau_ = tau;
   }
-  for (const auto &Ri: RVec) {
+  for (const auto &Ri : RVec) {
     checkRotationMatrix(Ri);
   }
   // Initialize estimate
-  singlePoseAveraging(ROpt,
-                      tOpt,
-                      RVec,
-                      tVec,
-                      kappa_.cwiseProduct(weights_),
+  singlePoseAveraging(ROpt, tOpt, RVec, tVec, kappa_.cwiseProduct(weights_),
                       tau_.cwiseProduct(weights_));
   Vector rSqVec = Vector::Zero(n);
   for (Eigen::Index i = 0; i < n; ++i) {
-    rSqVec(i) = kappa_(i) * (ROpt - RVec[i]).squaredNorm() + tau_(i) * (tOpt - tVec[i]).squaredNorm();
+    rSqVec(i) = kappa_(i) * (ROpt - RVec[i]).squaredNorm() +
+                tau_(i) * (tOpt - tVec[i]).squaredNorm();
   }
   // Initialize robust cost
   double barc = errorThreshold;
   double barcSq = barc * barc;
   double muInit = barcSq / (2 * rSqVec.maxCoeff() - barcSq);
   muInit = std::min(muInit, 1e-5);
-  // Negative values of initial mu corresponds to small residual errors. In this case skip applying GNC.
+  // Negative values of initial mu corresponds to small residual errors. In this
+  // case skip applying GNC.
   if (muInit > 0) {
     RobustCostParameters params;
     params.GNCBarc = barc;
@@ -863,16 +1117,13 @@ void robustSinglePoseAveraging(Matrix &ROpt, Vector &tOpt,
     unsigned iter = 0;
     for (iter = 0; iter < params.GNCMaxNumIters; ++iter) {
       // Update solution
-      singlePoseAveraging(ROpt,
-                          tOpt,
-                          RVec,
-                          tVec,
-                          kappa_.cwiseProduct(weights_),
+      singlePoseAveraging(ROpt, tOpt, RVec, tVec, kappa_.cwiseProduct(weights_),
                           tau_.cwiseProduct(weights_));
       // Update weight
       int nc = 0;
       for (Eigen::Index i = 0; i < n; ++i) {
-        double rSq = kappa_(i) * (ROpt - RVec[i]).squaredNorm() + tau_(i) * (tOpt - tVec[i]).squaredNorm();
+        double rSq = kappa_(i) * (ROpt - RVec[i]).squaredNorm() +
+                     tau_(i) * (tOpt - tVec[i]).squaredNorm();
         double wi = cost.weight(sqrt(rSq));
         if (wi < w_tol || wi > 1 - w_tol) {
           nc++;

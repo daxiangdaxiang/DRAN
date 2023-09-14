@@ -75,6 +75,8 @@ class QuadraticOptimizer {
   */
   ROPTResult getOptResult() const { return result; };
 
+  Matrix gradientDescent_H(const Matrix &Yinit, const Matrix &H);
+  Matrix vector_transport(const Matrix &X,const Matrix &xix);
  private:
   // Underlying Riemannian Optimization Problem
   QuadraticProblem *problem;
