@@ -473,21 +473,18 @@ void construct_private_OrientedConnectionIncidenceMatrixSE(
   OmegaT = Omega;
 }
 void construct_shared_OrientedConnectionIncidenceMatrixSE(
-    const std::vector<RelativeSEMeasurement> &shared_shared_measurements,
     const std::vector<RelativeSEMeasurement> &sharedLoopClosures,
-    const std::set<PoseID> &localSharedPoseIDs,
     const std::set<PoseID> &neighborSharedPoseIDs, SparseMatrix &AT,
     DiagonalMatrix &OmegaT) {
   size_t d;
-  d = (!shared_shared_measurements.empty()
-           ? shared_shared_measurements[0].t.size()
+  d = (!sharedLoopClosures.empty()
+           ? sharedLoopClosures[0].t.size()
            : 0);
   size_t dh = d + 1;
   size_t m;
-  m = shared_shared_measurements.size() + sharedLoopClosures.size();
-  size_t n = localSharedPoseIDs.size() +
+  m =sharedLoopClosures.size();
+  size_t n = 
              neighborSharedPoseIDs.size();  // Number of poses
-  size_t id = shared_shared_measurements[0].r1;
 
   size_t rows = (d + 1) * n;
   size_t cols = (d + 1) * m;
@@ -667,14 +664,12 @@ SparseMatrix construct_private_ConnectionLaplacianSE(
   return AT * OmegaT * AT.transpose();
 }
 SparseMatrix construct_shared_ConnectionLaplacianSE(
-    const std::vector<RelativeSEMeasurement> &shared_shared_measurements,
     const std::vector<RelativeSEMeasurement> &sharedLoopClosures,
-    const std::set<PoseID> &localSharedPoseIDs,
     const std::set<PoseID> &neighborSharedPoseIDs) {
   SparseMatrix AT;
   DiagonalMatrix OmegaT;
   construct_shared_OrientedConnectionIncidenceMatrixSE(
-      shared_shared_measurements, sharedLoopClosures, localSharedPoseIDs,
+       sharedLoopClosures, 
       neighborSharedPoseIDs, AT, OmegaT);
   return AT * OmegaT * AT.transpose();
 }
