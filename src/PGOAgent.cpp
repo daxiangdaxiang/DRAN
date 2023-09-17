@@ -88,57 +88,37 @@ void PGOAgent::setX(const Matrix &Xin) {
   H_local = shared_mProblemPtr->RieGrad(Y_shared);
 }
 void PGOAgent::setX_private() {
-  X_private = Matrix::Zero(r, localprivatePoseIDs.size() * (d + 1));
+  X_private = Matrix::Zero(r, num_poses()* (d + 1));
   size_t i = 0;
-  for (const auto &poseid : localprivatePoseIDs) {
-    unsigned int index = poseid.second;
+  for(i=0;i<num_poses();i++){
     X_private.block(0, i * (d + 1), r, d + 1) =
-        X.block(0, index * (d + 1), r, d + 1);
-    i++;
+        X.block(0, i * (d + 1), r, d + 1);
   }
+  // for (const auto &poseid : localprivatePoseIDs) {
+  //   unsigned int index = poseid.second;
+  //   X_private.block(0, i * (d + 1), r, d + 1) =
+  //       X.block(0, index * (d + 1), r, d + 1);
+  //   i++;
+  // }
 }
 
 void PGOAgent::setY_shared() {
   size_t i = 0;
   Y_shared = Matrix::Zero(
-      r, (localSharedPoseIDs.size() + neighborSharedPoseIDs.size()) * (d + 1));
-  for (auto &it : localSharedPoseIDs) {
-    assert(it.first == mID);
-    unsigned int index = it.second;
-    Y_shared.block(0, i * (d + 1), r, d + 1) =
-        X.block(0, index * (d + 1), r, d + 1);
+      r, ( neighborSharedPoseIDs.size()) * (d + 1));
 
-    i++;
-  }
   i = 0;
   for (auto &it : neighborSharedPoseIDs) {
-    Y_shared.block(0, (i + localSharedPoseIDs.size()) * (d + 1), r, d + 1) =
+    Y_shared.block(0, (i ) * (d + 1), r, d + 1) =
         X.block(0, (i + num_poses()) * (d + 1), r, d + 1);
     i++;
   }
 }
 void PGOAgent::set_whole_X() {
-  for (unsigned int i = 0; i < num_poses(); i++) {
-    auto it = localprivatePoseIDs.find(std::make_pair(mID, i));
-
-    if (it != localprivatePoseIDs.end()) {
-      size_t index = std::distance(localprivatePoseIDs.begin(), it);
-
-      X.block(0, i * (d + 1), r, d + 1) =
-          X_private.block(0, index * (d + 1), r, d + 1);
-    } else {
-      auto it2 = localSharedPoseIDs.find(std::make_pair(mID, i));
-      if (it2 != localSharedPoseIDs.end()) {
-        size_t index = std::distance(localSharedPoseIDs.begin(), it2);
-
-        X.block(0, i * (d + 1), r, d + 1) =
-            Y_shared.block(0, index * (d + 1), r, d + 1);
-      }
-    }
-  }
+  X.block(0, 0, r, num_poses() * (d + 1)) = X_private;
   for (size_t i = 0; i < neighborSharedPoseIDs.size(); i++) {
     X.block(0, (i + num_poses()) * (d + 1), r, d + 1) =
-        Y_shared.block(0, (i + localSharedPoseIDs.size()) * (d + 1), r, d + 1);
+        Y_shared.block(0, (i ) * (d + 1), r, d + 1);
   }
 }
 bool PGOAgent::getX(Matrix &Mout) {
@@ -146,23 +126,7 @@ bool PGOAgent::getX(Matrix &Mout) {
   // std::cout<<mID<<"martix"<<std::endl;
   // std::cout<<X<<std::endl;
   Mout = Matrix::Zero(r, num_poses() * (d + 1));
-  for (unsigned int i = 0; i < num_poses(); i++) {
-    auto it = localprivatePoseIDs.find(std::make_pair(mID, i));
-
-    if (it != localprivatePoseIDs.end()) {
-      size_t index = std::distance(localprivatePoseIDs.begin(), it);
-      Mout.block(0, i * (d + 1), r, d + 1) =
-          X_private.block(0, index * (d + 1), r, d + 1);
-
-    } else {
-      auto it2 = localSharedPoseIDs.find(std::make_pair(mID, i));
-      if (it2 != localSharedPoseIDs.end()) {
-        size_t index = std::distance(localSharedPoseIDs.begin(), it2);
-        Mout.block(0, i * (d + 1), r, d + 1) =
-            Y_shared.block(0, index * (d + 1), r, d + 1);
-      }
-    }
-  }
+  Mout=X_private;
 
   return true;
 }
@@ -189,11 +153,10 @@ bool PGOAgent::getSharedPoseDict(PoseDict &map) {
   map.clear();
   lock_guard<mutex> lock(mPosesMutex);
   size_t index = 0;
-  for (const auto &seperator : localSharedPoseIDs) {
-    map[seperator] = Y_shared.block(0, index * (d + 1), r, d + 1);
-    index++;
+  for(const auto &poseid:localSharedPoseIDs){
+    unsigned int index = poseid.second;
+    map[poseid] = X.block(0, index * (d + 1), r, d + 1);
   }
-  index = localSharedPoseIDs.size();
   for (auto &neighbor : neighborSharedPoseIDs) {
     map[neighbor] = Y_shared.block(0, index * (d + 1), r, d + 1);
     index++;
@@ -205,10 +168,10 @@ bool PGOAgent::getShared_H(std::map<PoseID, Matrix> &map) {
   map.clear();
   lock_guard<mutex> lock(mPosesMutex);
   size_t cnt = 0;
-  for (auto &it : localSharedPoseIDs) {
-    map[it] = H_local.block(0, cnt * (d + 1), r, d + 1);
-    cnt++;
-  }
+  // for(const auto &poseid:localSharedPoseIDs){
+  //   unsigned int index = poseid.second;
+  //   map[poseid] = H_local.block(0, index * (d + 1), r, d + 1);
+  // }
   for (auto &it : neighborSharedPoseIDs) {
     map[it] = H_local.block(0, cnt * (d + 1), r, d + 1);
     cnt++;
@@ -258,13 +221,13 @@ void PGOAgent::setPoseGraph(
 
   localMeasurements.insert(localMeasurements.end(), privateLoopClosures.begin(),
                            privateLoopClosures.end());
-  
 
   // for (auto &m : localMeasurements) {
   //   auto it_i = localprivatePoseIDs.find(std::make_pair(m.r1, m.p1));
   //   auto it_j = localprivatePoseIDs.find(std::make_pair(m.r2, m.p2));
 
-  //   if (it_i != localprivatePoseIDs.end() && it_j != localprivatePoseIDs.end())
+  //   if (it_i != localprivatePoseIDs.end() && it_j !=
+  //   localprivatePoseIDs.end())
   //     private_measurements.push_back(m);
   //   else if (it_i == localprivatePoseIDs.end() &&
   //            it_j == localprivatePoseIDs.end())
@@ -312,11 +275,10 @@ void PGOAgent::setPoseGraph(
   // Create new optimization problem
   mProblemPtr = new QuadraticProblem(num_poses() + neighborSharedPoseIDs.size(),
                                      dimension(), relaxation_rank());
-  private_mProblemPtr = new QuadraticProblem(
-      num_poses(), dimension(), relaxation_rank());
-  shared_mProblemPtr = new QuadraticProblem(
-       neighborSharedPoseIDs.size(), dimension(),
-      relaxation_rank());
+  private_mProblemPtr =
+      new QuadraticProblem(num_poses(), dimension(), relaxation_rank());
+  shared_mProblemPtr = new QuadraticProblem(neighborSharedPoseIDs.size(),
+                                            dimension(), relaxation_rank());
   // Robot can construct the quadratic cost matrix now, as it does not depend on
   // neighbor values constructQMatrix();
   construct_whole_QMatrix();
@@ -911,6 +873,7 @@ void PGOAgent::step1() {
   double f_private_Opt = private_mProblemPtr->f(X_private);
   double private_gradNormOpt = private_mProblemPtr->RieGradNorm(X_private);
   std::cout << "private delta: " << f_private_Init - f_private_Opt << std::endl;
+  std::cout<<"init private_RGrad: "<<private_gradNormInit<<" after private_RGrad: "<<private_gradNormOpt<<std::endl<<std::endl;
 
   // update shared variables
   construct_shared_GMatrix();
@@ -922,7 +885,8 @@ void PGOAgent::step1() {
   double share_gd_stepsize = 1e-3;
   QuadraticOptimizer shared_optimizer(shared_mProblemPtr);
   shared_optimizer.setGradientDescentStepsize(share_gd_stepsize);
-  Y_shared = shared_optimizer.gradientDescent_H(Y_shared_Prev, H_local);
+  private_optimizer.setAlgorithm(ROPTALG::RGD);
+  Y_shared = shared_optimizer.optimize(Y_shared_Prev);
   double f_shared_Opt = shared_mProblemPtr->f(Y_shared);
   double shared_gradNormOpt = shared_mProblemPtr->RieGradNorm(Y_shared);
 
@@ -947,40 +911,23 @@ void PGOAgent::step2() {
   QuadraticOptimizer shared_optimizer(shared_mProblemPtr);
 
   // update gradient tracking term
-  size_t cnt = 0;
+  // size_t cnt = 0;
 
-  for (auto &poseid : localSharedPoseIDs) {
-    Matrix H_sum = Matrix::Zero(d, d + 1);
-    double num_of_neighbor = H_seperator[poseid].size() + 1;
-    Matrix current_Y = Y_shared.block(0, cnt * (d + 1), d, d + 1);
-
-    for (auto &it : H_seperator[poseid]) {
-      H_sum += shared_optimizer.vector_transport(current_Y, it.second) /
-               num_of_neighbor;
-    }
-    H_sum += shared_optimizer.vector_transport(
-                 current_Y, H_local.block(0, cnt * (d + 1), d, d + 1)) /
-             num_of_neighbor;
-    H_sum -= shared_optimizer.vector_transport(
-        current_Y, RGrad_Y_shared_prev.block(0, cnt * (d + 1), d, d + 1));
-    H_local.block(0, cnt * (d + 1), d, d + 1) = H_sum;
-    cnt++;
-  }
-  for (auto &poseid : neighborSharedPoseIDs) {
-    Matrix H_sum = Matrix::Zero(d, d + 1);
-    double num_of_neighbor = 2;
-    Matrix current_Y = Y_shared.block(0, cnt * (d + 1), d, d + 1);
-    H_sum += shared_optimizer.vector_transport(current_Y, H_neighbor[poseid]) /
-             num_of_neighbor;
-    H_sum += shared_optimizer.vector_transport(
-                 current_Y, H_local.block(0, cnt * (d + 1), d, d + 1)) /
-             num_of_neighbor;
-    H_sum -= shared_optimizer.vector_transport(
-        current_Y, RGrad_Y_shared_prev.block(0, cnt * (d + 1), d, d + 1));
-    H_local.block(0, cnt * (d + 1), d, d + 1) = H_sum;
-    cnt++;
-  }
-  H_local += shared_mProblemPtr->RieGrad(Y_shared);
+  // for (auto &poseid : neighborSharedPoseIDs) {
+  //   Matrix H_sum = Matrix::Zero(d, d + 1);
+  //   double num_of_neighbor = 2;
+  //   Matrix current_Y = Y_shared.block(0, cnt * (d + 1), d, d + 1);
+  //   H_sum += shared_optimizer.vector_transport(current_Y, H_neighbor[poseid]) /
+  //            num_of_neighbor;
+  //   H_sum += shared_optimizer.vector_transport(
+  //                current_Y, H_local.block(0, cnt * (d + 1), d, d + 1)) /
+  //            num_of_neighbor;
+  //   H_sum -= shared_optimizer.vector_transport(
+  //       current_Y, RGrad_Y_shared_prev.block(0, cnt * (d + 1), d, d + 1));
+  //   H_local.block(0, cnt * (d + 1), d, d + 1) = H_sum;
+  //   cnt++;
+  // }
+  // H_local += shared_mProblemPtr->RieGrad(Y_shared);
   // std::cout << Y_shared.block(0, 0, 3, 3).transpose() *
   //                  H_local.block(0, 0, 3, 3)
   //           << std::endl;
@@ -1097,9 +1044,7 @@ void PGOAgent::construct_private_QMatrix() {
       Omega(row, row) = m.weight * m.kappa;
     }
 
-
     if (m.r1 == mID) {
-
       size_t index_i = m.p1;
 
       Matrix W = T * Omega * T.transpose();
@@ -1109,8 +1054,7 @@ void PGOAgent::construct_private_QMatrix() {
               W(row, col);
         }
       }
-    } else  {
-
+    } else {
       size_t index_j = m.p2;
       for (size_t col = 0; col < d + 1; ++col) {
         for (size_t row = 0; row < d + 1; ++row) {
@@ -1126,8 +1070,7 @@ void PGOAgent::construct_private_QMatrix() {
 }
 void PGOAgent::construct_shared_QMatrix() {
   SparseMatrix Q = construct_shared_ConnectionLaplacianSE(
-      shared_shared_measurements, sharedLoopClosures, localSharedPoseIDs,
-      neighborSharedPoseIDs);
+      sharedLoopClosures, neighborSharedPoseIDs);
 
   Matrix T = Matrix::Zero(d + 1, d + 1);
 
@@ -1135,7 +1078,7 @@ void PGOAgent::construct_shared_QMatrix() {
   Matrix Omega = Matrix::Zero(d + 1, d + 1);
 
   // Go through shared loop closures
-  for (const auto &m : private_shared_measurements) {
+  for (const auto &m : sharedLoopClosures) {
     // Set relative SE matrix (homogeneous form)
     T.block(0, 0, d, d) = m.R;
     T.block(0, d, d, 1) = m.t;
@@ -1145,14 +1088,10 @@ void PGOAgent::construct_shared_QMatrix() {
       Omega(row, row) = m.weight * m.kappa;
     }
     Omega(d, d) = m.weight * m.tau;
-    auto it_i = localSharedPoseIDs.find(std::make_pair(m.r1, m.p1));
-    auto it_j = localSharedPoseIDs.find(std::make_pair(m.r2, m.p2));
 
-    if (it_i != localSharedPoseIDs.end()) {
-      if (it_j != localSharedPoseIDs.end()) {
-        std::cout << "share error" << std::endl;
-      }
-      size_t index_i = std::distance(localSharedPoseIDs.begin(), it_i);
+    if (m.r1 != mID) {
+      auto it_i = neighborSharedPoseIDs.find(std::make_pair(m.r1, m.p1));
+      size_t index_i = std::distance(neighborSharedPoseIDs.begin(), it_i);
       Matrix W = T * Omega * T.transpose();
 
       for (size_t col = 0; col < d + 1; ++col)
@@ -1160,11 +1099,9 @@ void PGOAgent::construct_shared_QMatrix() {
           Q.coeffRef(index_i * (d + 1) + row, index_i * (d + 1) + col) +=
               W(row, col);
 
-    } else if (it_j != localSharedPoseIDs.end()) {
-      if (it_i != localSharedPoseIDs.end()) {
-        std::cout << "share2 error" << std::endl;
-      }
-      size_t index_j = std::distance(localSharedPoseIDs.begin(), it_j);
+    } else {
+      auto it_j = neighborSharedPoseIDs.find(std::make_pair(m.r2, m.p2));
+      size_t index_j = std::distance(neighborSharedPoseIDs.begin(), it_j);
       for (size_t col = 0; col < d + 1; ++col)
         for (size_t row = 0; row < d + 1; ++row)
           Q.coeffRef(index_j * (d + 1) + row, index_j * (d + 1) + col) +=
@@ -1256,9 +1193,8 @@ bool PGOAgent::constructGMatrix(const PoseDict &poseDict) {
 
 bool PGOAgent::construct_shared_GMatrix() {
   SparseMatrix G(relaxation_rank(),
-                 (dimension() + 1) * (localSharedPoseIDs.size() +
-                                      neighborSharedPoseIDs.size()));
-  for (const auto &m : private_shared_measurements) {
+                 (dimension() + 1) * (neighborSharedPoseIDs.size()));
+  for (const auto &m : sharedLoopClosures) {
     Matrix T = Matrix::Zero(d + 1, d + 1);
     T.block(0, 0, d, d) = m.R;
     T.block(0, d, d, 1) = m.t;
@@ -1268,15 +1204,12 @@ bool PGOAgent::construct_shared_GMatrix() {
       Omega(row, row) = m.weight * m.kappa;
     }
     Omega(d, d) = m.weight * m.tau;
-    auto it_i = localSharedPoseIDs.find(std::make_pair(m.r1, m.p1));
-    if (it_i != localSharedPoseIDs.end()) {
-      size_t index_i = std::distance(localSharedPoseIDs.begin(), it_i);
-      auto it_j = localprivatePoseIDs.find(std::make_pair(m.r2, m.p2));
+    if (m.r1 != mID) {
+      auto it_i = neighborSharedPoseIDs.find(std::make_pair(m.r1, m.p1));
 
-      if (it_j == localprivatePoseIDs.end())
-        std::cout << "local pose id " << m.r2 << ":" << m.p2 << "  error"
-                  << std::endl;
-      size_t index_j = std::distance(localprivatePoseIDs.begin(), it_j);
+      size_t index_i = std::distance(neighborSharedPoseIDs.begin(), it_i);
+
+      size_t index_j = m.p2;
       Matrix Xj = X_private.block(0, index_j * (d + 1), r, d + 1);
       Matrix L = -Xj * Omega * T.transpose();
       for (size_t col = 0; col < d + 1; ++col) {
@@ -1285,13 +1218,9 @@ bool PGOAgent::construct_shared_GMatrix() {
         }
       }
     } else {
-      auto it = localprivatePoseIDs.find(std::make_pair(m.r1, m.p1));
-
-      if (it == localprivatePoseIDs.end())
-        std::cout << "neighbor assert error" << std::endl;
-      size_t index_i = std::distance(localprivatePoseIDs.begin(), it);
-      auto it_j = localSharedPoseIDs.find(std::make_pair(m.r2, m.p2));
-      size_t index_j = std::distance(localSharedPoseIDs.begin(), it_j);
+      size_t index_i = m.p1;
+      auto it_j = neighborSharedPoseIDs.find(std::make_pair(m.r2, m.p2));
+      size_t index_j = std::distance(neighborSharedPoseIDs.begin(), it_j);
       Matrix Xi = X_private.block(0, index_i * (d + 1), r, d + 1);
       Matrix L = -Xi * T * Omega;
       for (size_t col = 0; col < d + 1; ++col) {
@@ -1306,9 +1235,8 @@ bool PGOAgent::construct_shared_GMatrix() {
   return true;
 }
 bool PGOAgent::construct_private_GMatrix() {
-  SparseMatrix G(relaxation_rank(),
-                 (dimension() + 1) * localprivatePoseIDs.size());
-  for (const auto &m : private_shared_measurements) {
+  SparseMatrix G(relaxation_rank(), (dimension() + 1) * num_poses());
+  for (const auto &m : sharedLoopClosures) {
     Matrix T = Matrix::Zero(d + 1, d + 1);
     T.block(0, 0, d, d) = m.R;
     T.block(0, d, d, 1) = m.t;
@@ -1319,12 +1247,12 @@ bool PGOAgent::construct_private_GMatrix() {
     }
     Omega(d, d) = m.weight * m.tau;
     auto it_i = localprivatePoseIDs.find(std::make_pair(m.r1, m.p1));
-    if (it_i != localprivatePoseIDs.end()) {
-      size_t index_i = std::distance(localprivatePoseIDs.begin(), it_i);
-      auto it_j = localSharedPoseIDs.find(std::make_pair(m.r2, m.p2));
-      if (it_j == localSharedPoseIDs.end())
+    if (m.r1 == mID) {
+      size_t index_i = m.p1;
+      auto it_j = neighborSharedPoseIDs.find(std::make_pair(m.r2, m.p2));
+      if (it_j == neighborSharedPoseIDs.end())
         std::cout << "assert error" << std::endl;
-      size_t index_j = std::distance(localSharedPoseIDs.begin(), it_j);
+      size_t index_j = std::distance(neighborSharedPoseIDs.begin(), it_j);
       Matrix Xj = Y_shared.block(0, index_j * (d + 1), r, d + 1);
 
       Matrix L = -Xj * Omega * T.transpose();
@@ -1334,12 +1262,11 @@ bool PGOAgent::construct_private_GMatrix() {
         }
       }
     } else {
-      auto it = localSharedPoseIDs.find(std::make_pair(m.r1, m.p1));
-      if (it == localSharedPoseIDs.end())
+      auto it = neighborSharedPoseIDs.find(std::make_pair(m.r1, m.p1));
+      if (it == neighborSharedPoseIDs.end())
         std::cout << "neighbor assert error" << std::endl;
-      size_t index_i = std::distance(localSharedPoseIDs.begin(), it);
-      auto it_j = localprivatePoseIDs.find(std::make_pair(m.r2, m.p2));
-      size_t index_j = std::distance(localprivatePoseIDs.begin(), it_j);
+      size_t index_i = std::distance(neighborSharedPoseIDs.begin(), it);
+      size_t index_j = m.p2;
       Matrix Xi = Y_shared.block(0, index_i * (d + 1), r, d + 1);
       Matrix L = -Xi * T * Omega;
       for (size_t col = 0; col < d + 1; ++col) {
@@ -1780,27 +1707,8 @@ void PGOAgent::consensus_step(double stepsize, int num_iter) {
   // go through seperator
   double finit = shared_mProblemPtr->f(Y_shared);
   size_t cnt = 0;
-  for (const auto &seperator : localSharedPoseIDs) {
-    Matrix gradR = Matrix::Zero(3, 3);
-    Vector gradt = Vector::Zero(3);
-    Matrix var;
-    var = Y_shared.block(0, cnt * (d + 1), r, d + 1);
-    // std::cout<<var<<std::endl<<"compare"<<std::endl;
-
-    Matrix R = var.block(0, 0, 3, 3);
-    Vector t = var.col(3);
-    // std::cout<<R<<std::endl;
-    //
-    // std::cout<<R.transpose()*neighbor_var.second.block(0,0,3,3)<<std::endl;
-    for (const auto &neighbor_var : X_seperator[seperator]) {
-      gradR += logmap(R.transpose() * neighbor_var.second.block(0, 0, 3, 3));
-      gradt += (neighbor_var.second.col(3) - t);
-    }
-    Y_shared.block(0, cnt * (d + 1), r, 3) =
-        (R * expmap(stepsize * gradR)).eval();
-    Y_shared.col(cnt * (d + 1) + 3) = (t + stepsize * gradt).eval();
-    cnt++;
-  }
+  
+ 
   for (const auto &neighbor : neighborSharedPoseIDs) {
     Matrix gradR = Matrix::Zero(3, 3);
     Vector gradt = Vector::Zero(3);

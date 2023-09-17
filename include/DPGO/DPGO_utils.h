@@ -62,9 +62,7 @@ void construct_private_OrientedConnectionIncidenceMatrixSE(
     DiagonalMatrix &OmegaT);
 
 void construct_shared_OrientedConnectionIncidenceMatrixSE(
-    const std::vector<RelativeSEMeasurement> &shared_shared_measurements,
     const std::vector<RelativeSEMeasurement> &sharedLoopClosures,
-    const std::set<PoseID> &localSharedPoseIDs,
     const std::set<PoseID> &neighborSharedPoseIDs, SparseMatrix &AT,
     DiagonalMatrix &OmegaT);
 
@@ -84,9 +82,7 @@ SparseMatrix construct_private_ConnectionLaplacianSE(
     const std::set<PoseID>&localprivatePoseIDs);
 
 SparseMatrix construct_shared_ConnectionLaplacianSE(
-    const std::vector<RelativeSEMeasurement> &shared_shared_measurements,
     const std::vector<RelativeSEMeasurement> &sharedLoopClosures,
-    const std::set<PoseID> &localSharedPoseIDs,
     const std::set<PoseID> &neighborSharedPoseIDs);
 /**
 Given a vector of relative pose measurements, this function computes and returns
