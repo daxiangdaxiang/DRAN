@@ -41,6 +41,7 @@ enum class CCIInitMode {
   TED_CCI_SR_AUTO,
   TED_CCI_SR_DIRECT,
   TED_CCI_SR_HIERARCHICAL,
+  TED_CCI_RIFT_IF,
   TED_CCI_ASYNC_DD,
   LOCAL_ONLY_CCI,
 };
@@ -49,6 +50,14 @@ enum class TEDCCIBackend {
   AUTO,
   DENSE_HOUSEHOLDER,
   SPARSE_SPQR,
+};
+
+enum class RIFTInterfaceBackend {
+  DIRECT_ORACLE,
+  RIFT_EXACT,
+  RIFT_AUTO,
+  RIFT_CAK,
+  RIFT_ASYNC_SCHUR,
 };
 
 enum class FactorType {
@@ -72,6 +81,15 @@ struct TEDCCIParams {
   int async_dd_max_iters = 200;
   double async_dd_rel_tol = 1e-8;
   bool async_dd_enable_coarse_correction = false;
+  RIFTInterfaceBackend rift_interface_backend =
+      RIFTInterfaceBackend::DIRECT_ORACLE;
+  bool rift_use_rotation_multi_rhs = false;
+  int rift_exact_max_separator_blocks_2d = 256;
+  int rift_exact_max_separator_blocks_3d = 128;
+  std::size_t rift_exact_max_message_bytes = 32ull * 1024ull * 1024ull;
+  bool rift_forbid_direct_interface_solver = false;
+  bool rift_forbid_global_interface_matrix = false;
+  bool rift_forbid_collectives = false;
   bool verbose = false;
 };
 
@@ -104,6 +122,22 @@ struct TEDCCIStats {
   std::size_t factor_dense_bytes_upward = 0;
   std::size_t factor_sparse_triplet_bytes_upward = 0;
   std::size_t factor_sparse_triplet_nonzeros = 0;
+  RIFTInterfaceBackend rift_selected_backend =
+      RIFTInterfaceBackend::DIRECT_ORACLE;
+  int rift_num_cliques = 0;
+  int rift_num_tree_edges = 0;
+  int rift_max_clique_blocks = 0;
+  int rift_max_separator_blocks = 0;
+  std::size_t rift_estimated_message_bytes = 0;
+  std::size_t rift_actual_message_bytes = 0;
+  int rift_directed_messages_sent = 0;
+  double rift_symbolic_ms = 0.0;
+  double rift_message_qr_ms = 0.0;
+  double rift_belief_solve_ms = 0.0;
+  double rift_final_interface_residual = -1.0;
+  bool rift_used_global_matrix = false;
+  bool rift_used_direct_solver = false;
+  bool rift_used_collective = false;
 };
 
 struct LinearFactorBlock {

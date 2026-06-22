@@ -4,6 +4,7 @@
 #include <DPGO/QuadraticOptimizer.h>
 #include <DPGO/QuadraticProblem.h>
 #include <DPGO/RelativeSEMeasurement.h>
+#include <DPGO/RIFTIF.h>
 #include <DPGO/TEDCCI.h>
 
 #include <Eigen/Geometry>
@@ -220,6 +221,11 @@ struct Options {
   std::string outputDcciProcessDir;
   unsigned dcciProcessFrameStride = 0;
   unsigned dcciProcessMaxFrames = 16;
+  RIFTInterfaceBackend interfaceBackend = RIFTInterfaceBackend::DIRECT_ORACLE;
+  bool useRotationMultiRhs = false;
+  bool forbidDirectInterfaceSolver = false;
+  bool forbidGlobalInterfaceMatrix = false;
+  bool forbidCollectives = false;
 };
 
 enum class BenchInitMode {
@@ -227,6 +233,7 @@ enum class BenchInitMode {
   TED_CCI_SR_AUTO,
   TED_CCI_SR_DIRECT,
   TED_CCI_SR_HIERARCHICAL,
+  TED_CCI_RIFT_IF,
   TED_CCI_ASYNC_DD,
 };
 
@@ -256,6 +263,10 @@ BenchInitMode parseBenchMode(const std::string &rawMode) {
   if (mode == "ted_cci_sr_hierarchical") {
     return BenchInitMode::TED_CCI_SR_HIERARCHICAL;
   }
+  if (mode == "ted_cci_rift_if" || mode == "rift_if" ||
+      mode == "ted_cci_rift_exact") {
+    return BenchInitMode::TED_CCI_RIFT_IF;
+  }
   if (mode == "ted_cci_async_dd") {
     return BenchInitMode::TED_CCI_ASYNC_DD;
   }
@@ -272,6 +283,8 @@ std::string modeName(BenchInitMode mode) {
       return "ted_cci_sr_direct";
     case BenchInitMode::TED_CCI_SR_HIERARCHICAL:
       return "ted_cci_sr_hierarchical";
+    case BenchInitMode::TED_CCI_RIFT_IF:
+      return "ted_cci_rift_if";
     case BenchInitMode::TED_CCI_ASYNC_DD:
       return "ted_cci_async_dd";
   }
@@ -290,6 +303,8 @@ std::string cciModeName(CCIInitMode mode) {
       return "ted_cci_sr_direct";
     case CCIInitMode::TED_CCI_SR_HIERARCHICAL:
       return "ted_cci_sr_hierarchical";
+    case CCIInitMode::TED_CCI_RIFT_IF:
+      return "ted_cci_rift_if";
     case CCIInitMode::TED_CCI_ASYNC_DD:
       return "ted_cci_async_dd";
     case CCIInitMode::LOCAL_ONLY_CCI:
@@ -310,6 +325,39 @@ std::string tedBackendName(TEDCCIBackend backend) {
   return "unknown";
 }
 
+RIFTInterfaceBackend parseRiftBackend(const std::string &rawBackend) {
+  const std::string backend = canonicalModeName(rawBackend);
+  if (backend == "direct_oracle") {
+    return RIFTInterfaceBackend::DIRECT_ORACLE;
+  }
+  if (backend == "rift_exact" || backend == "exact") {
+    return RIFTInterfaceBackend::RIFT_EXACT;
+  }
+  if (backend == "rift_auto" || backend == "auto") {
+    return RIFTInterfaceBackend::RIFT_AUTO;
+  }
+  if (backend == "rift_cak" || backend == "cak") {
+    return RIFTInterfaceBackend::RIFT_CAK;
+  }
+  if (backend == "rift_async_schur" || backend == "async_schur") {
+    return RIFTInterfaceBackend::RIFT_ASYNC_SCHUR;
+  }
+  throw std::invalid_argument("unknown RIFT interface backend: " + rawBackend);
+}
+
+bool parseBool(const std::string &value) {
+  const std::string canonical = canonicalModeName(value);
+  if (canonical == "1" || canonical == "true" || canonical == "yes" ||
+      canonical == "on") {
+    return true;
+  }
+  if (canonical == "0" || canonical == "false" || canonical == "no" ||
+      canonical == "off") {
+    return false;
+  }
+  throw std::invalid_argument("expected boolean value, got: " + value);
+}
+
 CCIInitMode tedMode(BenchInitMode mode) {
   switch (mode) {
     case BenchInitMode::TED_CCI_SR_AUTO:
@@ -318,6 +366,8 @@ CCIInitMode tedMode(BenchInitMode mode) {
       return CCIInitMode::TED_CCI_SR_DIRECT;
     case BenchInitMode::TED_CCI_SR_HIERARCHICAL:
       return CCIInitMode::TED_CCI_SR_HIERARCHICAL;
+    case BenchInitMode::TED_CCI_RIFT_IF:
+      return CCIInitMode::TED_CCI_RIFT_IF;
     case BenchInitMode::TED_CCI_ASYNC_DD:
       return CCIInitMode::TED_CCI_ASYNC_DD;
     case BenchInitMode::DPCG_CCI:
@@ -526,6 +576,21 @@ Options parseOptions(int argc, char **argv) {
       options.dcciProcessMaxFrames =
           static_cast<unsigned>(std::stoul(
               requireValue("--dcci-process-max-frames")));
+    } else if (arg == "--interface-backend") {
+      options.interfaceBackend =
+          parseRiftBackend(requireValue("--interface-backend"));
+    } else if (arg == "--use-rotation-multi-rhs") {
+      options.useRotationMultiRhs =
+          parseBool(requireValue("--use-rotation-multi-rhs"));
+    } else if (arg == "--forbid-direct-interface-solver") {
+      options.forbidDirectInterfaceSolver =
+          parseBool(requireValue("--forbid-direct-interface-solver"));
+    } else if (arg == "--forbid-global-interface-matrix") {
+      options.forbidGlobalInterfaceMatrix =
+          parseBool(requireValue("--forbid-global-interface-matrix"));
+    } else if (arg == "--forbid-collectives") {
+      options.forbidCollectives =
+          parseBool(requireValue("--forbid-collectives"));
     } else {
       throw std::invalid_argument("unknown argument: " + arg);
     }
@@ -611,6 +676,17 @@ TEDCCIParams makeTedParams(const Options &options, BenchInitMode mode) {
   params.use_measurement_weight = options.useWeight;
   params.async_dd_max_iters = static_cast<int>(options.maxIters);
   params.async_dd_rel_tol = options.relTol;
+  params.rift_interface_backend = options.interfaceBackend;
+  if (mode == BenchInitMode::TED_CCI_RIFT_IF &&
+      params.rift_interface_backend == RIFTInterfaceBackend::DIRECT_ORACLE) {
+    params.rift_interface_backend = RIFTInterfaceBackend::RIFT_EXACT;
+  }
+  params.rift_use_rotation_multi_rhs = options.useRotationMultiRhs;
+  params.rift_forbid_direct_interface_solver =
+      options.forbidDirectInterfaceSolver;
+  params.rift_forbid_global_interface_matrix =
+      options.forbidGlobalInterfaceMatrix;
+  params.rift_forbid_collectives = options.forbidCollectives;
   return params;
 }
 
@@ -767,6 +843,33 @@ void printBenchLine(const Options &options, size_t numPoses, size_t numEdges,
             << result.tedStats.async_dd_initial_residual
             << " ted_async_dd_final_residual="
             << result.tedStats.async_dd_final_residual
+            << " rift_selected_backend="
+            << RIFTInterfaceBackendName(result.tedStats.rift_selected_backend)
+            << " rift_num_cliques=" << result.tedStats.rift_num_cliques
+            << " rift_num_tree_edges=" << result.tedStats.rift_num_tree_edges
+            << " rift_max_clique_blocks="
+            << result.tedStats.rift_max_clique_blocks
+            << " rift_max_separator_blocks="
+            << result.tedStats.rift_max_separator_blocks
+            << " rift_estimated_message_bytes="
+            << result.tedStats.rift_estimated_message_bytes
+            << " rift_actual_message_bytes="
+            << result.tedStats.rift_actual_message_bytes
+            << " rift_directed_messages_sent="
+            << result.tedStats.rift_directed_messages_sent
+            << " rift_symbolic_ms=" << result.tedStats.rift_symbolic_ms
+            << " rift_message_qr_ms="
+            << result.tedStats.rift_message_qr_ms
+            << " rift_belief_solve_ms="
+            << result.tedStats.rift_belief_solve_ms
+            << " rift_final_interface_residual="
+            << result.tedStats.rift_final_interface_residual
+            << " rift_used_global_matrix="
+            << result.tedStats.rift_used_global_matrix
+            << " rift_used_direct_solver="
+            << result.tedStats.rift_used_direct_solver
+            << " rift_used_collective="
+            << result.tedStats.rift_used_collective
             << std::endl;
 }
 

@@ -6,6 +6,7 @@
  * -------------------------------------------------------------------------- */
 
 #include <DPGO/TEDCCI.h>
+#include <DPGO/RIFTIF.h>
 #include <DPGO/DPGO_utils.h>
 
 #include <Eigen/QR>
@@ -1447,6 +1448,14 @@ static Vector solveInterfaceForMode(
     }
     return InterfaceAsyncDDSolver::Solve(condensed_factors, cross_factors,
                                          block_dim, params, stats);
+  }
+  if (selectedMode == CCIInitMode::TED_CCI_RIFT_IF) {
+    if (stats != nullptr) {
+      stats->effective_mode = selectedMode;
+    }
+    return SolveTEDInterfaceWithRIFTExact(condensed_factors, cross_factors,
+                                          block_dim, partitions, params,
+                                          stats);
   }
   if (selectedMode == CCIInitMode::TED_CCI_SR_HIERARCHICAL) {
     const SeparatorTree tree =
@@ -3139,6 +3148,7 @@ Matrix TEDCCISolver::Initialize(
     case CCIInitMode::TED_CCI_SR_AUTO:
     case CCIInitMode::TED_CCI_SR_DIRECT:
     case CCIInitMode::TED_CCI_SR_HIERARCHICAL:
+    case CCIInitMode::TED_CCI_RIFT_IF:
     case CCIInitMode::TED_CCI_ASYNC_DD:
       return InitializeSingleProcessDirect(dimension, num_poses, measurements,
                                            partitions, params, stats);
@@ -3344,6 +3354,53 @@ Matrix TEDCCISolver::InitializeSingleProcessDirect(
     stats->factor_sparse_triplet_nonzeros =
         rotationInterfaceStats.factor_sparse_triplet_nonzeros +
         translationInterfaceStats.factor_sparse_triplet_nonzeros;
+    stats->rift_selected_backend =
+        rotationInterfaceStats.rift_selected_backend ==
+                RIFTInterfaceBackend::RIFT_EXACT ||
+            translationInterfaceStats.rift_selected_backend ==
+                RIFTInterfaceBackend::RIFT_EXACT
+            ? RIFTInterfaceBackend::RIFT_EXACT
+            : rotationInterfaceStats.rift_selected_backend;
+    stats->rift_num_cliques = rotationInterfaceStats.rift_num_cliques +
+                              translationInterfaceStats.rift_num_cliques;
+    stats->rift_num_tree_edges =
+        rotationInterfaceStats.rift_num_tree_edges +
+        translationInterfaceStats.rift_num_tree_edges;
+    stats->rift_max_clique_blocks =
+        std::max(rotationInterfaceStats.rift_max_clique_blocks,
+                 translationInterfaceStats.rift_max_clique_blocks);
+    stats->rift_max_separator_blocks =
+        std::max(rotationInterfaceStats.rift_max_separator_blocks,
+                 translationInterfaceStats.rift_max_separator_blocks);
+    stats->rift_estimated_message_bytes =
+        rotationInterfaceStats.rift_estimated_message_bytes +
+        translationInterfaceStats.rift_estimated_message_bytes;
+    stats->rift_actual_message_bytes =
+        rotationInterfaceStats.rift_actual_message_bytes +
+        translationInterfaceStats.rift_actual_message_bytes;
+    stats->rift_directed_messages_sent =
+        rotationInterfaceStats.rift_directed_messages_sent +
+        translationInterfaceStats.rift_directed_messages_sent;
+    stats->rift_symbolic_ms = rotationInterfaceStats.rift_symbolic_ms +
+                              translationInterfaceStats.rift_symbolic_ms;
+    stats->rift_message_qr_ms =
+        rotationInterfaceStats.rift_message_qr_ms +
+        translationInterfaceStats.rift_message_qr_ms;
+    stats->rift_belief_solve_ms =
+        rotationInterfaceStats.rift_belief_solve_ms +
+        translationInterfaceStats.rift_belief_solve_ms;
+    stats->rift_final_interface_residual = std::hypot(
+        std::max(0.0, rotationInterfaceStats.rift_final_interface_residual),
+        std::max(0.0, translationInterfaceStats.rift_final_interface_residual));
+    stats->rift_used_global_matrix =
+        rotationInterfaceStats.rift_used_global_matrix ||
+        translationInterfaceStats.rift_used_global_matrix;
+    stats->rift_used_direct_solver =
+        rotationInterfaceStats.rift_used_direct_solver ||
+        translationInterfaceStats.rift_used_direct_solver;
+    stats->rift_used_collective =
+        rotationInterfaceStats.rift_used_collective ||
+        translationInterfaceStats.rift_used_collective;
   }
 
   return T;

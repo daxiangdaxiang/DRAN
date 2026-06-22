@@ -91,6 +91,7 @@ add_library(DPGO SHARED
 	src/GeodesicSE3.cpp
 	src/GeodesicObjectProblem.cpp
 	src/TEDCCI.cpp
+	src/RIFTIF.cpp
 	src/InProcessDCCICommunicator.cpp
 	src/ObjectGaugeCoupling.cpp
 	src/BoundarySchurPreconditioner.cpp
@@ -234,6 +235,7 @@ if(BUILD_DPGO_TESTS)
 		tests/testTEDCCIAsyncFactorExchange.cpp
 		tests/testTEDCCIOrchestrator.cpp
 		tests/testTEDCCISolver.cpp
+		tests/testRIFTIF.cpp
 		tests/testLineGraph.cpp
 		tests/testTriangleGraph.cpp
 		tests/testOptimizationThread.cpp
@@ -281,6 +283,10 @@ if(BUILD_DPGO_TESTS)
 	add_test(
 		NAME dcci_initialization
 		COMMAND $<TARGET_FILE:testDPGO> --gtest_filter=*DCCIInitialization*
+		)
+	add_test(
+		NAME rift_if
+		COMMAND $<TARGET_FILE:testDPGO> --gtest_filter=*RIFTIF*
 		)
 	if(DCCI_MPI_ENABLED)
 		add_test(
