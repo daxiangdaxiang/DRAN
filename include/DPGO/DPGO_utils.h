@@ -89,7 +89,8 @@ Given a vector of relative pose measurements, this function computes and returns
 the B matrices defined in equation (69) of the tech report
 */
 void constructBMatrices(const std::vector<RelativeSEMeasurement> &measurements,
-                        SparseMatrix &B1, SparseMatrix &B2, SparseMatrix &B3);
+                        SparseMatrix &B1, SparseMatrix &B2, SparseMatrix &B3,
+                        bool use_measurement_weight = false);
 
 /**
  * @brief Initialize local trajectory estimate from chordal relaxation
@@ -101,7 +102,8 @@ void constructBMatrices(const std::vector<RelativeSEMeasurement> &measurements,
  */
 Matrix
 chordalInitialization(size_t dimension, size_t num_poses,
-                      const std::vector<RelativeSEMeasurement> &measurements);
+                      const std::vector<RelativeSEMeasurement> &measurements,
+                      bool use_measurement_weight = false);
 
 /**
  * @brief Initialize local trajectory estimate from odometry

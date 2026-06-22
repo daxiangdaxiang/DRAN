@@ -134,6 +134,7 @@ int main(int argc, char **argv) {
     PGOAgentParameters options(d, r, num_robots);
     options.acceleration = acceleration;
     options.verbose = verbose;
+    options.useConsensusCopies = true;
 
     auto *agent = new PGOAgent(robot, options);
 

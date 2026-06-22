@@ -109,6 +109,24 @@ struct PGOAgentParameters {
   // Directory to log data
   std::string logDirectory;
 
+  // Use the experimental consensus path that augments each local state with
+  // copies of neighbor separator poses.
+  bool useConsensusCopies;
+
+  // Trust-region solver controls for each selected local update.
+  unsigned trustRegionIterations;
+  int trustRegionMaxInnerIterations;
+  double trustRegionTolerance;
+  double trustRegionInitialRadius;
+
+  // Use the handwritten local quadratic trust-region solver instead of
+  // ROPTLIB's solver wrappers for local subproblems.
+  bool useManualLocalSolver;
+
+  // Use a reduced-rotation local quadratic solver that conditionally
+  // eliminates translation columns for fixed rotation blocks.
+  bool useReducedRotationLocalSolver;
+
   // Default constructor
   PGOAgentParameters(unsigned dIn, unsigned rIn, unsigned numRobotsIn = 1,
                      ROPTALG algorithmIn = ROPTALG::RTR, bool accel = false,
@@ -136,7 +154,14 @@ struct PGOAgentParameters {
         relChangeTol(changeTol),
         verbose(v),
         logData(log),
-        logDirectory(std::move(logDir)) {}
+        logDirectory(std::move(logDir)),
+        useConsensusCopies(false),
+        trustRegionIterations(1),
+        trustRegionMaxInnerIterations(10),
+        trustRegionTolerance(1e-2),
+        trustRegionInitialRadius(100),
+        useManualLocalSolver(false),
+        useReducedRotationLocalSolver(false) {}
 
   inline friend std::ostream &operator<<(std::ostream &os,
                                          const PGOAgentParameters &params) {
@@ -162,9 +187,41 @@ struct PGOAgentParameters {
     os << "Verbose: " << params.verbose << std::endl;
     os << "Log data: " << params.logData << std::endl;
     os << "Log directory: " << params.logDirectory << std::endl;
+    os << "Use consensus pose copies: " << params.useConsensusCopies
+       << std::endl;
+    os << "Trust-region iterations: " << params.trustRegionIterations
+       << std::endl;
+    os << "Trust-region max inner iterations: "
+       << params.trustRegionMaxInnerIterations << std::endl;
+    os << "Trust-region tolerance: " << params.trustRegionTolerance
+       << std::endl;
+    os << "Trust-region initial radius: " << params.trustRegionInitialRadius
+       << std::endl;
+    os << "Use manual local solver: " << params.useManualLocalSolver
+       << std::endl;
+    os << "Use reduced-rotation local solver: "
+       << params.useReducedRotationLocalSolver << std::endl;
     os << params.robustCostParams << std::endl;
     return os;
   }
+};
+
+struct LocalAmmIterationStats {
+  bool attempted{false};
+  bool accepted{false};
+  bool baselineCompared{false};
+  bool ammSelected{false};
+  bool baselineSelected{false};
+  double costBefore{0.0};
+  double costAfter{0.0};
+  double gradBefore{0.0};
+  double gradAfter{0.0};
+  double stepNorm{0.0};
+  double baselineCostAfter{0.0};
+  double baselineGradAfter{0.0};
+  double baselineStepNorm{0.0};
+  double vsBaselineCostDelta{0.0};
+  double vsBaselineGradDelta{0.0};
 };
 
 // Status of an agent to be shared with its peers
@@ -212,6 +269,25 @@ struct PGOAgentStatus {
     return os;
   }
 } __attribute__((aligned(32)));
+
+/**
+ * Compact local model state for one owned separator pose.
+ *
+ * This is diagnostic/model information, not an optimizer step by itself. The
+ * sender exposes the current pose block together with its local Riemannian
+ * gradient block, a block-diagonal stiffness proxy, and an optional compact
+ * preconditioned step from the local Q boundary block.
+ */
+struct BoundaryInterfaceState {
+  PoseID poseID;
+  Matrix pose;
+  Matrix gradient;
+  Matrix preconditionedStep;
+  double stiffness{0.0};
+  double preconditionerDamping{0.0};
+  double schurSensitivity{0.0};
+  double reducedPreconditioner{0.0};
+};
 
 class PGOAgent {
  public:
@@ -335,6 +411,21 @@ class PGOAgent {
    */
   std::vector<unsigned> getNeighborPublicPoses(
       const unsigned &neighborID) const;
+  bool refineLocalOptimization(unsigned refinements, bool acceleration = false,
+                               unsigned trustRegionIterationsOverride = 0);
+  bool iterateGuardedLocalAmm(bool doOptimization, double gamma,
+                              bool requireLocalDecrease,
+                              bool requireGradNonIncrease,
+                              bool compareBaseline,
+                              bool requireBeatBaseline,
+                              unsigned trustRegionIterationsOverride,
+                              LocalAmmIterationStats &stats);
+  bool refineLocalOptimizationWithNeighborModel(unsigned neighborID,
+                                                const PoseDict &poseDict,
+                                                unsigned refinements = 1,
+                                                unsigned trustRegionIterationsOverride = 0);
+  void enableAdaptiveTrustRegionRadius(bool enabled);
+  ROPTResult getLastOptimizationResult() const;
 
   /**
    * @brief new_added optimization
@@ -436,6 +527,166 @@ class PGOAgent {
    * @return
    */
   bool getX(Matrix &Mout);
+
+  /**
+   * @brief Evaluate this agent's current local quadratic model.
+   *
+   * The model is built from the agent's local measurements, current local
+   * estimate X, and the neighbor poses currently stored in neighborPoseDict.
+   * No centralized trajectory or global problem data is used.
+   *
+   * @param cost objective value in the same normalization as QuadraticProblem::f
+   * @param gradNorm Riemannian gradient norm at the current local X
+   * @return true if the model was available and all required neighbor poses
+   * were present; false otherwise.
+   */
+  bool evaluateLocalModel(double &cost, double &gradNorm);
+
+  /**
+   * @brief Apply one damped boundary Jacobi correction on local separator
+   * poses using the current local quadratic model and cached neighbor poses.
+   *
+   * This is not an RTR solve. It builds the current local model, extracts the
+   * Riemannian gradient on locally owned shared poses, applies a block-diagonal
+   * stiffness scaling from Q's diagonal, retracts by projection, and optionally
+   * accepts only if the local model decreases.
+   *
+   * @return true if a nonzero correction was accepted.
+   */
+  bool applyBoundaryJacobiCorrection(double stepSize, double maxBlockNorm,
+                                     bool requireLocalDecrease,
+                                     unsigned maxBacktrackingSteps,
+                                     double &costBefore, double &costAfter,
+                                     double &stepNorm,
+                                     unsigned &correctedBlocks);
+
+  /**
+   * @brief Predict one local boundary Jacobi interface state without modifying
+   * this agent's current estimate.
+   *
+   * The returned poses are locally owned shared poses after a damped,
+   * stiffness-scaled boundary correction. Receivers can use them as compact
+   * model lookahead states in place of the sender's raw current boundary pose.
+   *
+   * @return true if a nonzero prediction satisfying the local decrease rule was
+   * produced.
+   */
+  bool computeBoundaryJacobiPredictions(double stepSize, double maxBlockNorm,
+                                        bool requireLocalDecrease,
+                                        unsigned maxBacktrackingSteps,
+                                        PoseDict &predictedPoses,
+                                        double &costBefore,
+                                        double &costAfter,
+                                        double &stepNorm,
+                                        unsigned &predictedBlocks);
+
+  /**
+   * @brief Extract compact boundary interface model state without modifying X.
+   *
+   * The state contains locally owned shared-pose blocks, their current
+   * Riemannian gradient blocks, and a diagonal stiffness proxy. Persistent Q/G
+   * model matrices are restored before returning.
+   */
+  bool computeBoundaryInterfaceState(
+      std::vector<BoundaryInterfaceState> &states,
+      double &gradientNorm,
+      double &stiffnessSum);
+
+  /**
+   * @brief Evaluate this agent's local model after temporarily replacing one
+   * neighbor's cached boundary poses.
+   *
+   * The persistent neighbor cache is restored before returning.
+   */
+  bool evaluateLocalModelWithNeighborModel(unsigned neighborID,
+                                           const PoseDict &poseDict,
+                                           double &cost,
+                                           double &gradNorm);
+
+  /**
+   * @brief Evaluate this agent's local model after temporarily replacing any
+   * cached neighbor boundary poses included in poseDict.
+   *
+   * Unlike evaluateLocalModelWithNeighborModel(), this accepts poses from
+   * multiple neighbors and restores the persistent neighbor cache before
+   * returning.
+   */
+  bool evaluateLocalModelWithNeighborModels(const PoseDict &poseDict,
+                                            double &cost,
+                                            double &gradNorm);
+
+  /**
+   * @brief Run local optimization with a temporary multi-neighbor boundary
+   * model, then restore the persistent neighbor cache.
+   */
+  bool refineLocalOptimizationWithNeighborModels(
+      const PoseDict &poseDict, unsigned refinements = 1,
+      unsigned trustRegionIterationsOverride = 0);
+
+  /**
+   * @brief Apply a receiver-side boundary response correction from one
+   * neighbor's predicted boundary model.
+   *
+   * The correction compares this agent's local Riemannian gradient under a
+   * baseline neighbor model and under a boundary-predicted neighbor model. The
+   * resulting gradient response is applied only to local separator poses
+   * incident to neighborID, with diagonal stiffness scaling and optional
+   * local-model decrease filtering against the true cached neighbor poses.
+   * gradDeltaNorm reports the raw unscaled gradient-difference norm.
+   */
+  bool applyBoundaryResponseCorrection(
+      unsigned neighborID, const PoseDict &baselineNeighborPoses,
+      const PoseDict &modelNeighborPoses, double responseGain,
+      double stepSize, double maxBlockNorm, bool requireLocalDecrease,
+      unsigned maxBacktrackingSteps, double &costBefore, double &costAfter,
+      double &stepNorm, double &gradDeltaNorm, unsigned &correctedBlocks);
+
+  /**
+   * @brief Apply one receiver-side boundary response from a multi-neighbor
+   * temporary boundary model.
+   *
+   * The correction compares this agent's current true-cache local gradient
+   * with the gradient under poseDict's temporary neighbor boundary model. The
+   * resulting gradient response is applied only to local separator poses touched
+   * by poseDict, with diagonal stiffness scaling and optional local-model
+   * decrease filtering against the true cached neighbor poses. gradDeltaNorm
+   * reports the raw unscaled gradient-difference norm.
+   */
+  bool applyBoundaryResponseCorrectionWithNeighborModels(
+      const PoseDict &modelNeighborPoses, double responseGain,
+      double stepSize, double maxBlockNorm, bool requireLocalDecrease,
+      unsigned maxBacktrackingSteps, double &costBefore, double &costAfter,
+      double &stepNorm, double &gradDeltaNorm, unsigned &correctedBlocks);
+
+  /**
+   * @brief Apply a coupled receiver-side boundary response from a multi-neighbor
+   * temporary boundary model.
+   *
+   * This uses the same true-cache/model gradient difference as
+   * applyBoundaryResponseCorrectionWithNeighborModels(), but solves a compact
+   * regularized Q_BB response on the selected local separator columns instead
+   * of independently scaling each block by a diagonal stiffness.
+   * gradDeltaNorm reports the raw unscaled selected gradient-difference norm.
+   */
+  bool applyBoundarySchurResponseCorrectionWithNeighborModels(
+      const PoseDict &modelNeighborPoses, double responseGain,
+      double stepSize, double maxBlockNorm, double damping,
+      unsigned maxBlocks, bool requireLocalDecrease,
+      unsigned maxBacktrackingSteps, double &costBefore, double &costAfter,
+      double &stepNorm, double &gradDeltaNorm, unsigned &correctedBlocks,
+      const std::map<PoseID, BoundaryInterfaceState> *boundaryPackets =
+          nullptr,
+      double packetDampingGain = 0.0, double packetDampingMax = 0.0);
+
+  /**
+   * @brief Compute local shared-edge residual scores for poses needed from a
+   * neighbor.
+   *
+   * Scores use this agent's current local poses, local shared measurements, and
+   * cached neighbor poses. Missing neighbor poses are omitted.
+   */
+  bool getNeighborResidualScores(unsigned neighborID,
+                                 std::map<unsigned, double> &scores);
 
   /**
    * @brief determine if the termination condition is satisfied
@@ -582,6 +833,9 @@ class PGOAgent {
   QuadraticProblem *mProblemPtr;
   QuadraticProblem *private_mProblemPtr;
   QuadraticProblem *shared_mProblemPtr;
+  bool mAdaptiveTrustRegionRadius{false};
+  double mTrustRegionInitialRadius{100.0};
+  ROPTResult mLastOptimizationResult;
 
   // Rate in Hz of the optimization loop (only used in asynchronous mode)
   double mRate{};
@@ -813,6 +1067,8 @@ class PGOAgent {
   Matrix XPrev;
   Matrix X_private_Prev;
   Matrix Y_shared_Prev;
+  Matrix localAmmPreviousX;
+  bool localAmmStateInitialized{false};
 
   Matrix grad_prev;
   Matrix grad;
@@ -828,7 +1084,8 @@ class PGOAgent {
    * @param acceleration true to use acceleration
    * @return true if update is successful
    */
-  bool updateX(bool doOptimization = false, bool acceleration = false);
+  bool updateX(bool doOptimization = false, bool acceleration = false,
+               unsigned trustRegionIterationsOverride = 0);
 
   void updateY();
 

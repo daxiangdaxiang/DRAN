@@ -101,7 +101,9 @@ std::vector<RelativeSEMeasurement> read_g2o_file(const std::string &filename,
     std::stringstream strstrm(line);
 
     // Extract the first token from the string
-    strstrm >> token;
+    if (!(strstrm >> token)) {
+      continue;
+    }
 
     if (token == "EDGE_SE2") {
       // This is a 2D pose measurement
@@ -183,7 +185,8 @@ std::vector<RelativeSEMeasurement> read_g2o_file(const std::string &filename,
       RotCov << I44, I45, I46, I45, I55, I56, I46, I56, I66;
       measurement.kappa = 3 / (2 * RotCov.inverse().trace());
 
-    } else if ((token == "VERTEX_SE2") || (token == "VERTEX_SE3:QUAT")) {
+    } else if ((token == "VERTEX_SE2") || (token == "VERTEX_SE3:QUAT") ||
+               (token == "FIX") || (token == "FIX!")) {
       // This is just initialization information, so do nothing
       continue;
     } else {
@@ -580,7 +583,8 @@ Matrix expmap(const Matrix &S) {
   return ExpS;
 }
 void constructBMatrices(const std::vector<RelativeSEMeasurement> &measurements,
-                        SparseMatrix &B1, SparseMatrix &B2, SparseMatrix &B3) {
+                        SparseMatrix &B1, SparseMatrix &B2, SparseMatrix &B3,
+                        bool use_measurement_weight) {
   // Clear input matrices
   B1.setZero();
   B2.setZero();
@@ -605,7 +609,8 @@ void constructBMatrices(const std::vector<RelativeSEMeasurement> &measurements,
   for (size_t e = 0; e < measurements.size(); e++) {
     i = measurements[e].p1;
     j = measurements[e].p2;
-    sqrttau = sqrt(measurements[e].tau);
+    sqrttau = sqrt(measurements[e].tau *
+                   (use_measurement_weight ? measurements[e].weight : 1.0));
 
     // Block corresponding to the tail of the measurement
     for (size_t l = 0; l < d; l++) {
@@ -631,7 +636,8 @@ void constructBMatrices(const std::vector<RelativeSEMeasurement> &measurements,
 
   for (size_t e = 0; e < measurements.size(); e++) {
     i = measurements[e].p1;
-    sqrttau = sqrt(measurements[e].tau);
+    sqrttau = sqrt(measurements[e].tau *
+                   (use_measurement_weight ? measurements[e].weight : 1.0));
     for (size_t k = 0; k < d; k++)
       for (size_t r = 0; r < d; r++)
         triplets.emplace_back(d * e + r, d2 * i + d * k + r,
@@ -646,7 +652,9 @@ void constructBMatrices(const std::vector<RelativeSEMeasurement> &measurements,
   triplets.reserve((d3 + d2) * measurements.size());
 
   for (size_t e = 0; e < measurements.size(); e++) {
-    double sqrtkappa = std::sqrt(measurements[e].kappa);
+    double sqrtkappa = std::sqrt(
+        measurements[e].kappa *
+        (use_measurement_weight ? measurements[e].weight : 1.0));
     const Matrix &R = measurements[e].R;
 
     for (size_t r = 0; r < d; r++)
@@ -670,9 +678,10 @@ void constructBMatrices(const std::vector<RelativeSEMeasurement> &measurements,
 
 Matrix chordalInitialization(
     size_t dimension, size_t num_poses,
-    const std::vector<RelativeSEMeasurement> &measurements) {
+    const std::vector<RelativeSEMeasurement> &measurements,
+    bool use_measurement_weight) {
   SparseMatrix B1, B2, B3;
-  constructBMatrices(measurements, B1, B2, B3);
+  constructBMatrices(measurements, B1, B2, B3, use_measurement_weight);
 
   // Recover rotations
   size_t d = (!measurements.empty() ? measurements[0].t.size() : 0);

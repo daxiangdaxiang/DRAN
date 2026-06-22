@@ -6,8 +6,11 @@
  * -------------------------------------------------------------------------- */
 
 #include <DPGO/DPGO_utils.h>
+#include <DPGO/BoundarySchurPreconditioner.h>
+#include <DPGO/ManualQuadraticOptimizer.h>
 #include <DPGO/PGOAgent.h>
 #include <DPGO/QuadraticOptimizer.h>
+#include <DPGO/ReducedRotationQuadraticOptimizer.h>
 
 #include <Eigen/CholmodSupport>
 #include <algorithm>
@@ -34,6 +37,112 @@ using std::vector;
 
 namespace DPGO {
 
+namespace {
+
+double boundaryOffBlockCouplingRatio(const SparseMatrix &Q, unsigned colStart,
+                                     unsigned blockCols) {
+  double diagonalMagnitude = 0.0;
+  double offBlockMagnitude = 0.0;
+  const unsigned colEnd = colStart + blockCols;
+  for (unsigned row = colStart; row < colEnd; ++row) {
+    diagonalMagnitude +=
+        std::abs(Q.coeff(static_cast<int>(row), static_cast<int>(row)));
+    for (SparseMatrix::InnerIterator it(Q, static_cast<int>(row)); it; ++it) {
+      const unsigned col = static_cast<unsigned>(it.col());
+      if (col < colStart || col >= colEnd) {
+        offBlockMagnitude += std::abs(it.value());
+      }
+    }
+  }
+  if (!std::isfinite(diagonalMagnitude) || diagonalMagnitude < 1e-12) {
+    diagonalMagnitude = 1.0;
+  }
+  return offBlockMagnitude / diagonalMagnitude;
+}
+
+double fixedNeighborModelConstant(
+    const vector<RelativeSEMeasurement> &sharedLoopClosures,
+    const PoseDict &poseDict, unsigned robotID, unsigned dimension) {
+  double constant = 0.0;
+  for (const auto &m : sharedLoopClosures) {
+    Matrix T = Matrix::Zero(dimension + 1, dimension + 1);
+    T.block(0, 0, dimension, dimension) = m.R;
+    T.block(0, dimension, dimension, 1) = m.t;
+    T(dimension, dimension) = 1.0;
+
+    Matrix Omega = Matrix::Zero(dimension + 1, dimension + 1);
+    for (unsigned row = 0; row < dimension; ++row) {
+      Omega(row, row) = m.weight * m.kappa;
+    }
+    Omega(dimension, dimension) = m.weight * m.tau;
+
+    if (m.r1 == robotID) {
+      const auto it = poseDict.find(std::make_pair(m.r2, m.p2));
+      if (it == poseDict.end()) {
+        continue;
+      }
+      constant += 0.5 * ((it->second * Omega).cwiseProduct(it->second)).sum();
+    } else {
+      const auto it = poseDict.find(std::make_pair(m.r1, m.p1));
+      if (it == poseDict.end()) {
+        continue;
+      }
+      const Matrix neighborWeight = T * Omega * T.transpose();
+      constant +=
+          0.5 * ((it->second * neighborWeight).cwiseProduct(it->second)).sum();
+    }
+  }
+  return constant;
+}
+
+Matrix optimizeLocalQuadraticProblem(
+    QuadraticProblem *problem, const Matrix &initial,
+    const PGOAgentParameters &params, bool verbose,
+    double trustRegionInitialRadius, unsigned trustRegionIterationsOverride,
+    ROPTResult &result) {
+  const unsigned trIterations =
+      trustRegionIterationsOverride > 0 ? trustRegionIterationsOverride
+                                        : params.trustRegionIterations;
+  if (params.useManualLocalSolver) {
+    ManualQuadraticOptimizer optimizer(problem);
+    optimizer.setVerbose(verbose);
+    optimizer.setTrustRegionTolerance(params.trustRegionTolerance);
+    optimizer.setTrustRegionIterations(trIterations);
+    optimizer.setTrustRegionMaxInnerIterations(
+        params.trustRegionMaxInnerIterations);
+    optimizer.setTrustRegionInitialRadius(trustRegionInitialRadius);
+    Matrix candidate = optimizer.optimize(initial);
+    result = optimizer.getOptResult();
+    return candidate;
+  }
+
+  if (params.useReducedRotationLocalSolver) {
+    ReducedRotationQuadraticOptimizer optimizer(problem);
+    optimizer.setVerbose(verbose);
+    optimizer.setTrustRegionTolerance(params.trustRegionTolerance);
+    optimizer.setTrustRegionIterations(trIterations);
+    optimizer.setTrustRegionMaxInnerIterations(
+        params.trustRegionMaxInnerIterations);
+    optimizer.setTrustRegionInitialRadius(trustRegionInitialRadius);
+    Matrix candidate = optimizer.optimize(initial);
+    result = optimizer.getOptResult();
+    return candidate;
+  }
+
+  QuadraticOptimizer optimizer(problem);
+  optimizer.setVerbose(verbose);
+  optimizer.setAlgorithm(params.algorithm);
+  optimizer.setTrustRegionTolerance(params.trustRegionTolerance);
+  optimizer.setTrustRegionIterations(trIterations);
+  optimizer.setTrustRegionMaxInnerIterations(params.trustRegionMaxInnerIterations);
+  optimizer.setTrustRegionInitialRadius(trustRegionInitialRadius);
+  Matrix candidate = optimizer.optimize(initial);
+  result = optimizer.getOptResult();
+  return candidate;
+}
+
+}  // namespace
+
 PGOAgent::PGOAgent(unsigned ID, const PGOAgentParameters &params)
     : mID(ID),
       d(params.d),
@@ -44,6 +153,7 @@ PGOAgent::PGOAgent(unsigned ID, const PGOAgentParameters &params)
       mStatus(ID, mState, 0, 0, false, 0),
       mRobustCost(params.robustCostType, params.robustCostParams),
       mProblemPtr(nullptr),
+      mTrustRegionInitialRadius(params.trustRegionInitialRadius),
       mInstanceNumber(0),
       mIterationNumber(0),
       mNumPosesReceived(0),
@@ -69,11 +179,17 @@ void PGOAgent::setX(const Matrix &Xin) {
   lock_guard<mutex> lock(mPosesMutex);
   assert(mState != PGOAgentState::WAIT_FOR_DATA);
   assert(Xin.rows() == relaxation_rank());
-  assert(Xin.cols() ==
-         (dimension() + 1) * (num_poses() + neighborSharedPoseIDs.size()));
+  if (mParams.useConsensusCopies) {
+    assert(Xin.cols() ==
+           (dimension() + 1) * (num_poses() + neighborSharedPoseIDs.size()));
+  } else {
+    assert(Xin.cols() == (dimension() + 1) * num_poses());
+  }
   mState = PGOAgentState::INITIALIZED;
   X = Xin;
   Y = Xin;
+  localAmmPreviousX = Xin;
+  localAmmStateInitialized = false;
   if (mParams.acceleration) {
     initializeAcceleration();
   }
@@ -82,10 +198,12 @@ void PGOAgent::setX(const Matrix &Xin) {
            getID(), num_poses());
   }
   setX_private();
-  setY_shared();
-  construct_shared_GMatrix();
-  construct_private_GMatrix();
-  H_local = shared_mProblemPtr->RieGrad(Y_shared);
+  if (mParams.useConsensusCopies) {
+    setY_shared();
+    construct_shared_GMatrix();
+    construct_private_GMatrix();
+    H_local = shared_mProblemPtr->RieGrad(Y_shared);
+  }
 }
 void PGOAgent::setX_private() {
   X_private = Matrix::Zero(r, num_poses()* (d + 1));
@@ -123,18 +241,1234 @@ void PGOAgent::set_whole_X() {
 }
 bool PGOAgent::getX(Matrix &Mout) {
   lock_guard<mutex> lock(mPosesMutex);
-  // std::cout<<mID<<"martix"<<std::endl;
-  // std::cout<<X<<std::endl;
-  Mout = Matrix::Zero(r, num_poses() * (d + 1));
-  Mout=X_private;
+  if (mParams.useConsensusCopies) {
+    Mout = X_private;
+  } else {
+    Mout = X;
+  }
+  return true;
+}
 
+bool PGOAgent::evaluateLocalModel(double &cost, double &gradNorm) {
+  unique_lock<mutex> tLock(mPosesMutex);
+  unique_lock<mutex> mLock(mMeasurementsMutex);
+  unique_lock<mutex> nLock(mNeighborPosesMutex);
+
+  cost = 0.0;
+  gradNorm = 0.0;
+
+  if (mState != PGOAgentState::INITIALIZED || mProblemPtr == nullptr) {
+    return false;
+  }
+
+  // The local event-triggering model is the standard DPGO local model:
+  // local X is optimized while neighbor poses are fixed through G.
+  if (mParams.useConsensusCopies) {
+    return false;
+  }
+
+  if (mParams.robustCostType != RobustCostType::L2) {
+    constructQMatrix();
+  }
+
+  if (!constructGMatrix(neighborPoseDict)) {
+    return false;
+  }
+
+  assert(X.rows() == relaxation_rank());
+  assert(X.cols() == (dimension() + 1) * num_poses());
+  cost = mProblemPtr->f(X) +
+         fixedNeighborModelConstant(sharedLoopClosures, neighborPoseDict, mID,
+                                    d);
+  gradNorm = mProblemPtr->RieGradNorm(X);
+  return true;
+}
+
+bool PGOAgent::applyBoundaryJacobiCorrection(
+    double stepSize, double maxBlockNorm, bool requireLocalDecrease,
+    unsigned maxBacktrackingSteps, double &costBefore, double &costAfter,
+    double &stepNorm, unsigned &correctedBlocks) {
+  unique_lock<mutex> tLock(mPosesMutex);
+  unique_lock<mutex> mLock(mMeasurementsMutex);
+  unique_lock<mutex> nLock(mNeighborPosesMutex);
+
+  costBefore = 0.0;
+  costAfter = 0.0;
+  stepNorm = 0.0;
+  correctedBlocks = 0;
+
+  if (stepSize <= 0.0 || mState != PGOAgentState::INITIALIZED ||
+      mProblemPtr == nullptr || mParams.useConsensusCopies) {
+    return false;
+  }
+
+  if (mParams.robustCostType != RobustCostType::L2) {
+    constructQMatrix();
+  }
+  if (!constructGMatrix(neighborPoseDict)) {
+    return false;
+  }
+
+  const SparseMatrix Q = mProblemPtr->getQ();
+  const Matrix grad = mProblemPtr->RieGrad(X);
+  Matrix direction = Matrix::Zero(X.rows(), X.cols());
+
+  for (const PoseID &poseID : localSharedPoseIDs) {
+    if (poseID.first != mID || poseID.second >= n) {
+      continue;
+    }
+    const unsigned poseIndex = poseID.second;
+    const unsigned colStart = poseIndex * (d + 1);
+    Matrix block = grad.block(0, colStart, r, d + 1);
+    if (block.norm() <= 1e-14) {
+      continue;
+    }
+
+    double stiffness = 0.0;
+    for (unsigned c = 0; c < d + 1; ++c) {
+      stiffness += std::abs(Q.coeff(colStart + c, colStart + c));
+    }
+    stiffness /= static_cast<double>(d + 1);
+    if (!std::isfinite(stiffness) || stiffness < 1e-8) {
+      stiffness = 1.0;
+    }
+
+    Matrix correction = -block / stiffness;
+    const double blockNorm = correction.norm();
+    if (maxBlockNorm > 0.0 && blockNorm > maxBlockNorm) {
+      correction *= maxBlockNorm / blockNorm;
+    }
+    direction.block(0, colStart, r, d + 1) = correction;
+    ++correctedBlocks;
+  }
+
+  if (correctedBlocks == 0 || direction.norm() <= 1e-14) {
+    costBefore = mProblemPtr->f(X);
+    costAfter = costBefore;
+    return false;
+  }
+
+  costBefore = mProblemPtr->f(X);
+  costAfter = costBefore;
+  const Matrix XBefore = X;
+  LiftedSEManifold manifold(r, d, n);
+  double alpha = stepSize;
+  const unsigned trials = std::max(1u, maxBacktrackingSteps + 1u);
+  for (unsigned trial = 0; trial < trials; ++trial) {
+    Matrix candidate = manifold.project(XBefore + alpha * direction);
+    const double candidateCost = mProblemPtr->f(candidate);
+    if (!requireLocalDecrease || candidateCost <= costBefore) {
+      const double acceptedStepNorm = (candidate - XBefore).norm();
+      if (acceptedStepNorm <= 1e-14) {
+        correctedBlocks = 0;
+        stepNorm = 0.0;
+        costAfter = costBefore;
+        return false;
+      }
+      X = candidate;
+      costAfter = candidateCost;
+      stepNorm = acceptedStepNorm;
+      if (mParams.acceleration) {
+        XPrev = X;
+        V = X;
+        Y = X;
+        gamma = 0.0;
+        alpha = 0.0;
+      }
+      return true;
+    }
+    alpha *= 0.5;
+  }
+
+  correctedBlocks = 0;
+  stepNorm = 0.0;
+  return false;
+}
+
+bool PGOAgent::computeBoundaryJacobiPredictions(
+    double stepSize, double maxBlockNorm, bool requireLocalDecrease,
+    unsigned maxBacktrackingSteps, PoseDict &predictedPoses,
+    double &costBefore, double &costAfter, double &stepNorm,
+    unsigned &predictedBlocks) {
+  unique_lock<mutex> tLock(mPosesMutex);
+  unique_lock<mutex> mLock(mMeasurementsMutex);
+  unique_lock<mutex> nLock(mNeighborPosesMutex);
+
+  predictedPoses.clear();
+  costBefore = 0.0;
+  costAfter = 0.0;
+  stepNorm = 0.0;
+  predictedBlocks = 0;
+
+  if (stepSize <= 0.0 || mState != PGOAgentState::INITIALIZED ||
+      mProblemPtr == nullptr || mParams.useConsensusCopies) {
+    return false;
+  }
+
+  if (mParams.robustCostType != RobustCostType::L2) {
+    constructQMatrix();
+  }
+  if (!constructGMatrix(neighborPoseDict)) {
+    return false;
+  }
+
+  const SparseMatrix Q = mProblemPtr->getQ();
+  const Matrix grad = mProblemPtr->RieGrad(X);
+  Matrix direction = Matrix::Zero(X.rows(), X.cols());
+  std::vector<unsigned> predictedPoseIndices;
+
+  for (const PoseID &poseID : localSharedPoseIDs) {
+    if (poseID.first != mID || poseID.second >= n) {
+      continue;
+    }
+    const unsigned poseIndex = poseID.second;
+    const unsigned colStart = poseIndex * (d + 1);
+    Matrix block = grad.block(0, colStart, r, d + 1);
+    if (block.norm() <= 1e-14) {
+      continue;
+    }
+
+    double stiffness = 0.0;
+    for (unsigned c = 0; c < d + 1; ++c) {
+      stiffness += std::abs(Q.coeff(colStart + c, colStart + c));
+    }
+    stiffness /= static_cast<double>(d + 1);
+    if (!std::isfinite(stiffness) || stiffness < 1e-8) {
+      stiffness = 1.0;
+    }
+
+    Matrix correction = -block / stiffness;
+    const double blockNorm = correction.norm();
+    if (maxBlockNorm > 0.0 && blockNorm > maxBlockNorm) {
+      correction *= maxBlockNorm / blockNorm;
+    }
+    direction.block(0, colStart, r, d + 1) = correction;
+    predictedPoseIndices.push_back(poseIndex);
+  }
+
+  if (predictedPoseIndices.empty() || direction.norm() <= 1e-14) {
+    costBefore = mProblemPtr->f(X);
+    costAfter = costBefore;
+    return false;
+  }
+
+  costBefore = mProblemPtr->f(X);
+  costAfter = costBefore;
+  LiftedSEManifold manifold(r, d, n);
+  double alpha = stepSize;
+  const unsigned trials = std::max(1u, maxBacktrackingSteps + 1u);
+  for (unsigned trial = 0; trial < trials; ++trial) {
+    Matrix candidate = manifold.project(X + alpha * direction);
+    const double candidateCost = mProblemPtr->f(candidate);
+    if (!requireLocalDecrease || candidateCost <= costBefore) {
+      const double acceptedStepNorm = (candidate - X).norm();
+      if (acceptedStepNorm <= 1e-14) {
+        costAfter = costBefore;
+        return false;
+      }
+      for (unsigned poseIndex : predictedPoseIndices) {
+        predictedPoses[std::make_pair(mID, poseIndex)] =
+            candidate.block(0, poseIndex * (d + 1), r, d + 1);
+      }
+      costAfter = candidateCost;
+      stepNorm = acceptedStepNorm;
+      predictedBlocks = static_cast<unsigned>(predictedPoses.size());
+      return predictedBlocks > 0;
+    }
+    alpha *= 0.5;
+  }
+
+  predictedPoses.clear();
+  stepNorm = 0.0;
+  predictedBlocks = 0;
+  return false;
+}
+
+bool PGOAgent::computeBoundaryInterfaceState(
+    std::vector<BoundaryInterfaceState> &states,
+    double &gradientNorm,
+    double &stiffnessSum) {
+  unique_lock<mutex> tLock(mPosesMutex);
+  unique_lock<mutex> mLock(mMeasurementsMutex);
+  unique_lock<mutex> nLock(mNeighborPosesMutex);
+
+  states.clear();
+  gradientNorm = 0.0;
+  stiffnessSum = 0.0;
+
+  if (mState != PGOAgentState::INITIALIZED || mProblemPtr == nullptr ||
+      mParams.useConsensusCopies) {
+    return false;
+  }
+
+  const SparseMatrix oldG = mProblemPtr->getG();
+  std::optional<SparseMatrix> oldQ;
+  if (mParams.robustCostType != RobustCostType::L2) {
+    oldQ = mProblemPtr->getQ();
+    constructQMatrix();
+  }
+  if (!constructGMatrix(neighborPoseDict)) {
+    if (oldQ.has_value()) {
+      mProblemPtr->setQ(*oldQ);
+    }
+    mProblemPtr->setG(oldG);
+    return false;
+  }
+
+  const SparseMatrix Q = mProblemPtr->getQ();
+  const Matrix grad = mProblemPtr->RieGrad(X);
+  double gradientSquaredNorm = 0.0;
+
+  for (const PoseID &poseID : localSharedPoseIDs) {
+    if (poseID.first != mID || poseID.second >= n) {
+      continue;
+    }
+    const unsigned poseIndex = poseID.second;
+    const unsigned colStart = poseIndex * (d + 1);
+    BoundaryInterfaceState state;
+    state.poseID = poseID;
+    state.pose = X.block(0, colStart, r, d + 1);
+    state.gradient = grad.block(0, colStart, r, d + 1);
+
+    double stiffness = 0.0;
+    for (unsigned c = 0; c < d + 1; ++c) {
+      stiffness += std::abs(Q.coeff(colStart + c, colStart + c));
+    }
+    stiffness /= static_cast<double>(d + 1);
+    if (!std::isfinite(stiffness) || stiffness < 1e-8) {
+      stiffness = 1.0;
+    }
+    state.stiffness = stiffness;
+    state.preconditionerDamping = std::max(1e-8, 1e-3 * stiffness);
+    state.schurSensitivity =
+        boundaryOffBlockCouplingRatio(Q, colStart, d + 1);
+    state.preconditionedStep = solveBoundaryLocalSchurPreconditionedStep(
+        Q, grad, colStart, d + 1, state.preconditionerDamping, 64);
+    if (!state.preconditionedStep.allFinite() ||
+        (state.gradient.norm() > 1e-12 &&
+         state.preconditionedStep.norm() < 1e-14)) {
+      state.preconditionedStep = solveBoundaryBlockPreconditionedStep(
+          Q, state.gradient, colStart, d + 1, state.preconditionerDamping);
+    }
+    const double blockGradientNorm = state.gradient.norm();
+    state.reducedPreconditioner =
+        blockGradientNorm > 1e-12 && state.preconditionedStep.allFinite()
+            ? state.preconditionedStep.norm() / blockGradientNorm
+            : 0.0;
+    stiffnessSum += stiffness;
+    gradientSquaredNorm += state.gradient.squaredNorm();
+    states.push_back(std::move(state));
+  }
+
+  gradientNorm = std::sqrt(gradientSquaredNorm);
+  if (oldQ.has_value()) {
+    mProblemPtr->setQ(*oldQ);
+  }
+  mProblemPtr->setG(oldG);
+  return !states.empty();
+}
+
+bool PGOAgent::evaluateLocalModelWithNeighborModel(
+    unsigned neighborID, const PoseDict &poseDict, double &cost,
+    double &gradNorm) {
+  unique_lock<mutex> tLock(mPosesMutex);
+  unique_lock<mutex> mLock(mMeasurementsMutex);
+  unique_lock<mutex> nLock(mNeighborPosesMutex);
+
+  cost = 0.0;
+  gradNorm = 0.0;
+
+  if (poseDict.empty() || mState != PGOAgentState::INITIALIZED ||
+      mProblemPtr == nullptr || mParams.useConsensusCopies) {
+    return false;
+  }
+
+  PoseDict backupPoses;
+  for (const auto &it : poseDict) {
+    const PoseID nID = it.first;
+    if (nID.first != neighborID ||
+        neighborSharedPoseIDs.find(nID) == neighborSharedPoseIDs.end()) {
+      continue;
+    }
+    const auto oldIt = neighborPoseDict.find(nID);
+    if (oldIt == neighborPoseDict.end()) {
+      continue;
+    }
+    backupPoses[nID] = oldIt->second;
+    neighborPoseDict[nID] = it.second;
+  }
+
+  if (backupPoses.empty()) {
+    return false;
+  }
+
+  const SparseMatrix oldG = mProblemPtr->getG();
+  std::optional<SparseMatrix> oldQ;
+  if (mParams.robustCostType != RobustCostType::L2) {
+    oldQ = mProblemPtr->getQ();
+    constructQMatrix();
+  }
+  bool ok = constructGMatrix(neighborPoseDict);
+  if (ok) {
+    cost = mProblemPtr->f(X) +
+           fixedNeighborModelConstant(sharedLoopClosures, neighborPoseDict,
+                                      mID, d);
+    gradNorm = mProblemPtr->RieGradNorm(X);
+  }
+
+  for (const auto &it : backupPoses) {
+    neighborPoseDict[it.first] = it.second;
+  }
+  if (oldQ.has_value()) {
+    mProblemPtr->setQ(*oldQ);
+  }
+  mProblemPtr->setG(oldG);
+  return ok;
+}
+
+bool PGOAgent::evaluateLocalModelWithNeighborModels(
+    const PoseDict &poseDict, double &cost, double &gradNorm) {
+  unique_lock<mutex> tLock(mPosesMutex);
+  unique_lock<mutex> mLock(mMeasurementsMutex);
+  unique_lock<mutex> nLock(mNeighborPosesMutex);
+
+  cost = 0.0;
+  gradNorm = 0.0;
+
+  if (poseDict.empty() || mState != PGOAgentState::INITIALIZED ||
+      mProblemPtr == nullptr || mParams.useConsensusCopies) {
+    return false;
+  }
+
+  PoseDict backupPoses;
+  for (const auto &it : poseDict) {
+    const PoseID nID = it.first;
+    if (neighborSharedPoseIDs.find(nID) == neighborSharedPoseIDs.end()) {
+      continue;
+    }
+    const auto oldIt = neighborPoseDict.find(nID);
+    if (oldIt == neighborPoseDict.end()) {
+      continue;
+    }
+    backupPoses[nID] = oldIt->second;
+    neighborPoseDict[nID] = it.second;
+  }
+
+  if (backupPoses.empty()) {
+    return false;
+  }
+
+  const SparseMatrix oldG = mProblemPtr->getG();
+  std::optional<SparseMatrix> oldQ;
+  if (mParams.robustCostType != RobustCostType::L2) {
+    oldQ = mProblemPtr->getQ();
+    constructQMatrix();
+  }
+  bool ok = constructGMatrix(neighborPoseDict);
+  if (ok) {
+    cost = mProblemPtr->f(X) +
+           fixedNeighborModelConstant(sharedLoopClosures, neighborPoseDict,
+                                      mID, d);
+    gradNorm = mProblemPtr->RieGradNorm(X);
+  }
+
+  for (const auto &it : backupPoses) {
+    neighborPoseDict[it.first] = it.second;
+  }
+  if (oldQ.has_value()) {
+    mProblemPtr->setQ(*oldQ);
+  }
+  mProblemPtr->setG(oldG);
+  return ok;
+}
+
+bool PGOAgent::refineLocalOptimizationWithNeighborModels(
+    const PoseDict &poseDict, unsigned refinements,
+    unsigned trustRegionIterationsOverride) {
+  if (refinements == 0 || poseDict.empty() ||
+      mState != PGOAgentState::INITIALIZED) {
+    return true;
+  }
+
+  unique_lock<mutex> tLock(mPosesMutex);
+  unique_lock<mutex> mLock(mMeasurementsMutex);
+  unique_lock<mutex> lock(mNeighborPosesMutex);
+
+  PoseDict backupPoses;
+  for (const auto &it : poseDict) {
+    const PoseID nID = it.first;
+    if (neighborSharedPoseIDs.find(nID) == neighborSharedPoseIDs.end()) {
+      continue;
+    }
+    const auto oldIt = neighborPoseDict.find(nID);
+    if (oldIt == neighborPoseDict.end()) {
+      continue;
+    }
+    backupPoses[nID] = oldIt->second;
+    neighborPoseDict[nID] = it.second;
+  }
+
+  if (backupPoses.empty()) {
+    return true;
+  }
+
+  bool ok = true;
+  for (unsigned i = 0; i < refinements; ++i) {
+    ok = updateX(true, false, trustRegionIterationsOverride) && ok;
+  }
+  if (mParams.acceleration) {
+    XPrev = X;
+    V = X;
+    Y = X;
+    gamma = 0.0;
+    alpha = 0.0;
+  }
+
+  for (const auto &it : backupPoses) {
+    neighborPoseDict[it.first] = it.second;
+  }
+  return ok;
+}
+
+bool PGOAgent::applyBoundaryResponseCorrection(
+    unsigned neighborID, const PoseDict &baselineNeighborPoses,
+    const PoseDict &modelNeighborPoses, double responseGain, double stepSize,
+    double maxBlockNorm, bool requireLocalDecrease,
+    unsigned maxBacktrackingSteps, double &costBefore, double &costAfter,
+    double &stepNorm, double &gradDeltaNorm, unsigned &correctedBlocks) {
+  unique_lock<mutex> tLock(mPosesMutex);
+  unique_lock<mutex> mLock(mMeasurementsMutex);
+  unique_lock<mutex> nLock(mNeighborPosesMutex);
+
+  costBefore = 0.0;
+  costAfter = 0.0;
+  stepNorm = 0.0;
+  gradDeltaNorm = 0.0;
+  correctedBlocks = 0;
+
+  if (stepSize <= 0.0 || responseGain <= 0.0 || modelNeighborPoses.empty() ||
+      mState != PGOAgentState::INITIALIZED || mProblemPtr == nullptr ||
+      mParams.useConsensusCopies) {
+    return false;
+  }
+
+  const SparseMatrix oldG = mProblemPtr->getG();
+  std::optional<SparseMatrix> oldQ;
+  if (mParams.robustCostType != RobustCostType::L2) {
+    oldQ = mProblemPtr->getQ();
+    constructQMatrix();
+  }
+
+  auto restoreProblem = [&]() {
+    if (oldQ.has_value()) {
+      mProblemPtr->setQ(*oldQ);
+    }
+    mProblemPtr->setG(oldG);
+  };
+
+  if (!constructGMatrix(neighborPoseDict)) {
+    restoreProblem();
+    return false;
+  }
+  const SparseMatrix trueCacheG = mProblemPtr->getG();
+  auto restoreAcceptedProblem = [&]() {
+    if (oldQ.has_value()) {
+      mProblemPtr->setQ(*oldQ);
+    }
+    mProblemPtr->setG(trueCacheG);
+  };
+  const SparseMatrix localQ = mProblemPtr->getQ();
+  costBefore = mProblemPtr->f(X);
+
+  auto applyTemporaryNeighborPoses = [&](const PoseDict &poses,
+                                         PoseDict &backupPoses) {
+    backupPoses.clear();
+    for (const auto &it : poses) {
+      const PoseID nID = it.first;
+      if (nID.first != neighborID ||
+          neighborSharedPoseIDs.find(nID) == neighborSharedPoseIDs.end()) {
+        continue;
+      }
+      const auto oldIt = neighborPoseDict.find(nID);
+      if (oldIt == neighborPoseDict.end()) {
+        continue;
+      }
+      backupPoses[nID] = oldIt->second;
+      neighborPoseDict[nID] = it.second;
+    }
+    return !backupPoses.empty();
+  };
+  auto restoreNeighborPoses = [&](const PoseDict &backupPoses) {
+    for (const auto &it : backupPoses) {
+      neighborPoseDict[it.first] = it.second;
+    }
+  };
+
+  auto computeGradientWithTemporaryNeighborPoses =
+      [&](const PoseDict &poses, Matrix &gradient) {
+        PoseDict backupPoses;
+        const bool hasTemporaryPoses =
+            !poses.empty() && applyTemporaryNeighborPoses(poses, backupPoses);
+        if (!poses.empty() && !hasTemporaryPoses) {
+          return false;
+        }
+        const bool ok = constructGMatrix(neighborPoseDict);
+        if (ok) {
+          gradient = mProblemPtr->RieGrad(X);
+        }
+        if (hasTemporaryPoses) {
+          restoreNeighborPoses(backupPoses);
+        }
+        return ok;
+      };
+
+  Matrix gradBase;
+  Matrix gradModel;
+  const bool baselineOk = computeGradientWithTemporaryNeighborPoses(
+      baselineNeighborPoses, gradBase);
+  const bool modelOk =
+      computeGradientWithTemporaryNeighborPoses(modelNeighborPoses, gradModel);
+  if (!baselineOk || !modelOk || gradBase.rows() != X.rows() ||
+      gradBase.cols() != X.cols() || gradModel.rows() != X.rows() ||
+      gradModel.cols() != X.cols()) {
+    constructGMatrix(neighborPoseDict);
+    restoreProblem();
+    return false;
+  }
+
+  if (!constructGMatrix(neighborPoseDict)) {
+    restoreProblem();
+    return false;
+  }
+
+  std::set<unsigned> activeNeighborPoseIndices;
+  for (const auto &it : modelNeighborPoses) {
+    if (it.first.first == neighborID &&
+        neighborSharedPoseIDs.find(it.first) != neighborSharedPoseIDs.end()) {
+      activeNeighborPoseIndices.insert(it.first.second);
+    }
+  }
+
+  std::set<unsigned> activeLocalPoseIndices;
+  for (const auto &m : sharedLoopClosures) {
+    if (m.r1 == mID && m.r2 == neighborID &&
+        activeNeighborPoseIndices.find(m.p2) !=
+            activeNeighborPoseIndices.end()) {
+      activeLocalPoseIndices.insert(m.p1);
+    } else if (m.r2 == mID && m.r1 == neighborID &&
+               activeNeighborPoseIndices.find(m.p1) !=
+                   activeNeighborPoseIndices.end()) {
+      activeLocalPoseIndices.insert(m.p2);
+    }
+  }
+
+  Matrix direction = Matrix::Zero(X.rows(), X.cols());
+  const Matrix gradDelta = gradModel - gradBase;
+  double gradDeltaSquaredNorm = 0.0;
+  for (unsigned poseIndex : activeLocalPoseIndices) {
+    if (poseIndex >= n) {
+      continue;
+    }
+    const unsigned colStart = poseIndex * (d + 1);
+    const Matrix rawBlock = gradDelta.block(0, colStart, r, d + 1);
+    if (rawBlock.norm() <= 1e-14) {
+      continue;
+    }
+    Matrix block = responseGain * rawBlock;
+
+    double stiffness = 0.0;
+    for (unsigned c = 0; c < d + 1; ++c) {
+      stiffness += std::abs(localQ.coeff(colStart + c, colStart + c));
+    }
+    stiffness /= static_cast<double>(d + 1);
+    if (!std::isfinite(stiffness) || stiffness < 1e-8) {
+      stiffness = 1.0;
+    }
+
+    Matrix correction = -block / stiffness;
+    const double blockNorm = correction.norm();
+    if (maxBlockNorm > 0.0 && blockNorm > maxBlockNorm) {
+      correction *= maxBlockNorm / blockNorm;
+    }
+    direction.block(0, colStart, r, d + 1) = correction;
+    gradDeltaSquaredNorm += rawBlock.squaredNorm();
+    ++correctedBlocks;
+  }
+  gradDeltaNorm = std::sqrt(gradDeltaSquaredNorm);
+
+  if (correctedBlocks == 0 || direction.norm() <= 1e-14) {
+    costAfter = costBefore;
+    restoreProblem();
+    return false;
+  }
+
+  const Matrix XBefore = X;
+  LiftedSEManifold manifold(r, d, n);
+  double trialStep = stepSize;
+  const unsigned trials = std::max(1u, maxBacktrackingSteps + 1u);
+  for (unsigned trial = 0; trial < trials; ++trial) {
+    Matrix candidate = manifold.project(XBefore + trialStep * direction);
+    const double candidateCost = mProblemPtr->f(candidate);
+    if (!requireLocalDecrease || candidateCost <= costBefore) {
+      const double acceptedStepNorm = (candidate - XBefore).norm();
+      if (acceptedStepNorm <= 1e-14) {
+        correctedBlocks = 0;
+        stepNorm = 0.0;
+        costAfter = costBefore;
+        restoreProblem();
+        return false;
+      }
+      X = candidate;
+      costAfter = candidateCost;
+      stepNorm = acceptedStepNorm;
+      if (mParams.acceleration) {
+        XPrev = X;
+        V = X;
+        Y = X;
+        gamma = 0.0;
+        this->alpha = 0.0;
+      }
+      restoreAcceptedProblem();
+      return true;
+    }
+    trialStep *= 0.5;
+  }
+
+  correctedBlocks = 0;
+  stepNorm = 0.0;
+  costAfter = costBefore;
+  restoreProblem();
+  return false;
+}
+
+bool PGOAgent::applyBoundaryResponseCorrectionWithNeighborModels(
+    const PoseDict &modelNeighborPoses, double responseGain, double stepSize,
+    double maxBlockNorm, bool requireLocalDecrease,
+    unsigned maxBacktrackingSteps, double &costBefore, double &costAfter,
+    double &stepNorm, double &gradDeltaNorm, unsigned &correctedBlocks) {
+  unique_lock<mutex> tLock(mPosesMutex);
+  unique_lock<mutex> mLock(mMeasurementsMutex);
+  unique_lock<mutex> nLock(mNeighborPosesMutex);
+
+  costBefore = 0.0;
+  costAfter = 0.0;
+  stepNorm = 0.0;
+  gradDeltaNorm = 0.0;
+  correctedBlocks = 0;
+
+  if (stepSize <= 0.0 || responseGain <= 0.0 || modelNeighborPoses.empty() ||
+      mState != PGOAgentState::INITIALIZED || mProblemPtr == nullptr ||
+      mParams.useConsensusCopies) {
+    return false;
+  }
+
+  const SparseMatrix oldG = mProblemPtr->getG();
+  std::optional<SparseMatrix> oldQ;
+  if (mParams.robustCostType != RobustCostType::L2) {
+    oldQ = mProblemPtr->getQ();
+    constructQMatrix();
+  }
+
+  auto restoreProblem = [&]() {
+    if (oldQ.has_value()) {
+      mProblemPtr->setQ(*oldQ);
+    }
+    mProblemPtr->setG(oldG);
+  };
+
+  if (!constructGMatrix(neighborPoseDict)) {
+    restoreProblem();
+    return false;
+  }
+  const SparseMatrix trueCacheG = mProblemPtr->getG();
+  auto restoreAcceptedProblem = [&]() {
+    if (oldQ.has_value()) {
+      mProblemPtr->setQ(*oldQ);
+    }
+    mProblemPtr->setG(trueCacheG);
+  };
+  const SparseMatrix localQ = mProblemPtr->getQ();
+  costBefore = mProblemPtr->f(X);
+  const Matrix gradBase = mProblemPtr->RieGrad(X);
+
+  PoseDict backupPoses;
+  for (const auto &it : modelNeighborPoses) {
+    const PoseID nID = it.first;
+    if (neighborSharedPoseIDs.find(nID) == neighborSharedPoseIDs.end()) {
+      continue;
+    }
+    const auto oldIt = neighborPoseDict.find(nID);
+    if (oldIt == neighborPoseDict.end()) {
+      continue;
+    }
+    backupPoses[nID] = oldIt->second;
+    neighborPoseDict[nID] = it.second;
+  }
+  if (backupPoses.empty()) {
+    restoreProblem();
+    return false;
+  }
+
+  const bool modelOk = constructGMatrix(neighborPoseDict);
+  Matrix gradModel;
+  if (modelOk) {
+    gradModel = mProblemPtr->RieGrad(X);
+  }
+  for (const auto &it : backupPoses) {
+    neighborPoseDict[it.first] = it.second;
+  }
+  if (!modelOk || gradBase.rows() != X.rows() ||
+      gradBase.cols() != X.cols() || gradModel.rows() != X.rows() ||
+      gradModel.cols() != X.cols()) {
+    constructGMatrix(neighborPoseDict);
+    restoreProblem();
+    return false;
+  }
+
+  if (!constructGMatrix(neighborPoseDict)) {
+    restoreProblem();
+    return false;
+  }
+
+  std::set<unsigned> activeLocalPoseIndices;
+  for (const auto &it : modelNeighborPoses) {
+    const PoseID nID = it.first;
+    if (neighborSharedPoseIDs.find(nID) == neighborSharedPoseIDs.end()) {
+      continue;
+    }
+    const unsigned neighborID = nID.first;
+    const unsigned neighborPoseIndex = nID.second;
+    for (const auto &m : sharedLoopClosures) {
+      if (m.r1 == mID && m.r2 == neighborID &&
+          m.p2 == neighborPoseIndex) {
+        activeLocalPoseIndices.insert(m.p1);
+      } else if (m.r2 == mID && m.r1 == neighborID &&
+                 m.p1 == neighborPoseIndex) {
+        activeLocalPoseIndices.insert(m.p2);
+      }
+    }
+  }
+
+  Matrix direction = Matrix::Zero(X.rows(), X.cols());
+  const Matrix gradDelta = gradModel - gradBase;
+  double gradDeltaSquaredNorm = 0.0;
+  for (unsigned poseIndex : activeLocalPoseIndices) {
+    if (poseIndex >= n) {
+      continue;
+    }
+    const unsigned colStart = poseIndex * (d + 1);
+    const Matrix rawBlock = gradDelta.block(0, colStart, r, d + 1);
+    if (rawBlock.norm() <= 1e-14) {
+      continue;
+    }
+    Matrix block = responseGain * rawBlock;
+
+    double stiffness = 0.0;
+    for (unsigned c = 0; c < d + 1; ++c) {
+      stiffness += std::abs(localQ.coeff(colStart + c, colStart + c));
+    }
+    stiffness /= static_cast<double>(d + 1);
+    if (!std::isfinite(stiffness) || stiffness < 1e-8) {
+      stiffness = 1.0;
+    }
+
+    Matrix correction = -block / stiffness;
+    const double blockNorm = correction.norm();
+    if (maxBlockNorm > 0.0 && blockNorm > maxBlockNorm) {
+      correction *= maxBlockNorm / blockNorm;
+    }
+    direction.block(0, colStart, r, d + 1) = correction;
+    gradDeltaSquaredNorm += rawBlock.squaredNorm();
+    ++correctedBlocks;
+  }
+  gradDeltaNorm = std::sqrt(gradDeltaSquaredNorm);
+
+  if (correctedBlocks == 0 || direction.norm() <= 1e-14) {
+    costAfter = costBefore;
+    restoreProblem();
+    return false;
+  }
+
+  const Matrix XBefore = X;
+  LiftedSEManifold manifold(r, d, n);
+  double trialStep = stepSize;
+  const unsigned trials = std::max(1u, maxBacktrackingSteps + 1u);
+  for (unsigned trial = 0; trial < trials; ++trial) {
+    Matrix candidate = manifold.project(XBefore + trialStep * direction);
+    const double candidateCost = mProblemPtr->f(candidate);
+    if (!requireLocalDecrease || candidateCost <= costBefore) {
+      const double acceptedStepNorm = (candidate - XBefore).norm();
+      if (acceptedStepNorm <= 1e-14) {
+        correctedBlocks = 0;
+        stepNorm = 0.0;
+        costAfter = costBefore;
+        restoreProblem();
+        return false;
+      }
+      X = candidate;
+      costAfter = candidateCost;
+      stepNorm = acceptedStepNorm;
+      if (mParams.acceleration) {
+        XPrev = X;
+        V = X;
+        Y = X;
+        gamma = 0.0;
+        this->alpha = 0.0;
+      }
+      restoreAcceptedProblem();
+      return true;
+    }
+    trialStep *= 0.5;
+  }
+
+  correctedBlocks = 0;
+  stepNorm = 0.0;
+  costAfter = costBefore;
+  restoreProblem();
+  return false;
+}
+
+bool PGOAgent::applyBoundarySchurResponseCorrectionWithNeighborModels(
+    const PoseDict &modelNeighborPoses, double responseGain, double stepSize,
+    double maxBlockNorm, double damping, unsigned maxBlocks,
+    bool requireLocalDecrease, unsigned maxBacktrackingSteps,
+    double &costBefore, double &costAfter, double &stepNorm,
+    double &gradDeltaNorm, unsigned &correctedBlocks,
+    const std::map<PoseID, BoundaryInterfaceState> *boundaryPackets,
+    double packetDampingGain, double packetDampingMax) {
+  unique_lock<mutex> tLock(mPosesMutex);
+  unique_lock<mutex> mLock(mMeasurementsMutex);
+  unique_lock<mutex> nLock(mNeighborPosesMutex);
+
+  costBefore = 0.0;
+  costAfter = 0.0;
+  stepNorm = 0.0;
+  gradDeltaNorm = 0.0;
+  correctedBlocks = 0;
+
+  if (stepSize <= 0.0 || responseGain <= 0.0 || modelNeighborPoses.empty() ||
+      mState != PGOAgentState::INITIALIZED || mProblemPtr == nullptr ||
+      mParams.useConsensusCopies) {
+    return false;
+  }
+
+  const SparseMatrix oldG = mProblemPtr->getG();
+  std::optional<SparseMatrix> oldQ;
+  if (mParams.robustCostType != RobustCostType::L2) {
+    oldQ = mProblemPtr->getQ();
+    constructQMatrix();
+  }
+
+  auto restoreProblem = [&]() {
+    if (oldQ.has_value()) {
+      mProblemPtr->setQ(*oldQ);
+    }
+    mProblemPtr->setG(oldG);
+  };
+
+  if (!constructGMatrix(neighborPoseDict)) {
+    restoreProblem();
+    return false;
+  }
+  const SparseMatrix trueCacheG = mProblemPtr->getG();
+  auto restoreAcceptedProblem = [&]() {
+    if (oldQ.has_value()) {
+      mProblemPtr->setQ(*oldQ);
+    }
+    mProblemPtr->setG(trueCacheG);
+  };
+  const SparseMatrix localQ = mProblemPtr->getQ();
+  costBefore = mProblemPtr->f(X);
+  const Matrix gradBase = mProblemPtr->RieGrad(X);
+
+  PoseDict backupPoses;
+  for (const auto &it : modelNeighborPoses) {
+    const PoseID nID = it.first;
+    if (neighborSharedPoseIDs.find(nID) == neighborSharedPoseIDs.end()) {
+      continue;
+    }
+    const auto oldIt = neighborPoseDict.find(nID);
+    if (oldIt == neighborPoseDict.end()) {
+      continue;
+    }
+    backupPoses[nID] = oldIt->second;
+    neighborPoseDict[nID] = it.second;
+  }
+  if (backupPoses.empty()) {
+    restoreProblem();
+    return false;
+  }
+
+  const bool modelOk = constructGMatrix(neighborPoseDict);
+  Matrix gradModel;
+  if (modelOk) {
+    gradModel = mProblemPtr->RieGrad(X);
+  }
+  for (const auto &it : backupPoses) {
+    neighborPoseDict[it.first] = it.second;
+  }
+  if (!modelOk || gradBase.rows() != X.rows() ||
+      gradBase.cols() != X.cols() || gradModel.rows() != X.rows() ||
+      gradModel.cols() != X.cols()) {
+    constructGMatrix(neighborPoseDict);
+    restoreProblem();
+    return false;
+  }
+
+  if (!constructGMatrix(neighborPoseDict)) {
+    restoreProblem();
+    return false;
+  }
+
+  std::set<unsigned> activeLocalPoseSet;
+  std::map<unsigned, double> packetExtraDampingByLocalPose;
+  for (const auto &it : modelNeighborPoses) {
+    const PoseID nID = it.first;
+    if (neighborSharedPoseIDs.find(nID) == neighborSharedPoseIDs.end()) {
+      continue;
+    }
+    const unsigned neighborID = nID.first;
+    const unsigned neighborPoseIndex = nID.second;
+    double packetExtraDamping = 0.0;
+    if (boundaryPackets != nullptr && packetDampingGain > 0.0 &&
+        packetDampingMax > 0.0) {
+      const auto packetIt = boundaryPackets->find(nID);
+      if (packetIt != boundaryPackets->end()) {
+        packetExtraDamping = boundaryPacketSchurExtraDamping(
+            packetIt->second.schurSensitivity,
+            packetIt->second.reducedPreconditioner, packetDampingGain,
+            packetDampingMax);
+      }
+    }
+    for (const auto &m : sharedLoopClosures) {
+      if (m.r1 == mID && m.r2 == neighborID &&
+          m.p2 == neighborPoseIndex) {
+        activeLocalPoseSet.insert(m.p1);
+        if (packetExtraDamping > 0.0) {
+          packetExtraDampingByLocalPose[m.p1] = std::max(
+              packetExtraDampingByLocalPose[m.p1], packetExtraDamping);
+        }
+      } else if (m.r2 == mID && m.r1 == neighborID &&
+                 m.p1 == neighborPoseIndex) {
+        activeLocalPoseSet.insert(m.p2);
+        if (packetExtraDamping > 0.0) {
+          packetExtraDampingByLocalPose[m.p2] = std::max(
+              packetExtraDampingByLocalPose[m.p2], packetExtraDamping);
+        }
+      }
+    }
+  }
+
+  std::vector<unsigned> activeLocalPoses;
+  activeLocalPoses.reserve(activeLocalPoseSet.size());
+  for (unsigned poseIndex : activeLocalPoseSet) {
+    if (poseIndex < n) {
+      activeLocalPoses.push_back(poseIndex);
+    }
+  }
+  const Matrix gradDelta = gradModel - gradBase;
+  if (maxBlocks > 0 && activeLocalPoses.size() > maxBlocks) {
+    struct ScoredPose {
+      unsigned poseIndex;
+      double score;
+    };
+    std::vector<ScoredPose> scoredPoses;
+    scoredPoses.reserve(activeLocalPoses.size());
+    for (unsigned poseIndex : activeLocalPoses) {
+      const unsigned colStart = poseIndex * (d + 1);
+      scoredPoses.push_back(
+          {poseIndex, gradDelta.block(0, colStart, r, d + 1).squaredNorm()});
+    }
+    std::sort(scoredPoses.begin(), scoredPoses.end(),
+              [](const ScoredPose &a, const ScoredPose &b) {
+                if (a.score == b.score) {
+                  return a.poseIndex < b.poseIndex;
+                }
+                return a.score > b.score;
+              });
+    activeLocalPoses.clear();
+    for (size_t i = 0; i < std::min<size_t>(maxBlocks, scoredPoses.size());
+         ++i) {
+      activeLocalPoses.push_back(scoredPoses[i].poseIndex);
+    }
+    std::sort(activeLocalPoses.begin(), activeLocalPoses.end());
+  }
+  if (activeLocalPoses.empty()) {
+    costAfter = costBefore;
+    restoreProblem();
+    return false;
+  }
+
+  std::vector<unsigned> activeCols;
+  activeCols.reserve(activeLocalPoses.size() * (d + 1));
+  for (unsigned poseIndex : activeLocalPoses) {
+    const unsigned colStart = poseIndex * (d + 1);
+    for (unsigned c = 0; c < d + 1; ++c) {
+      activeCols.push_back(colStart + c);
+    }
+  }
+
+  Matrix rhs = Matrix::Zero(X.rows(), activeCols.size());
+  double gradDeltaSquaredNorm = 0.0;
+  for (size_t j = 0; j < activeCols.size(); ++j) {
+    rhs.col(j) = -responseGain * gradDelta.col(activeCols[j]);
+    gradDeltaSquaredNorm += gradDelta.col(activeCols[j]).squaredNorm();
+  }
+  gradDeltaNorm = std::sqrt(gradDeltaSquaredNorm);
+  if (gradDeltaNorm <= 1e-14) {
+    costAfter = costBefore;
+    restoreProblem();
+    return false;
+  }
+
+  Matrix A = Matrix::Zero(activeCols.size(), activeCols.size());
+  for (size_t row = 0; row < activeCols.size(); ++row) {
+    for (size_t col = 0; col < activeCols.size(); ++col) {
+      A(row, col) = localQ.coeff(activeCols[row], activeCols[col]);
+    }
+  }
+  const double lambda = std::max(0.0, damping);
+  A.diagonal().array() += lambda;
+  for (size_t pose = 0; pose < activeLocalPoses.size(); ++pose) {
+    const auto dampingIt =
+        packetExtraDampingByLocalPose.find(activeLocalPoses[pose]);
+    if (dampingIt == packetExtraDampingByLocalPose.end() ||
+        dampingIt->second <= 0.0 || !std::isfinite(dampingIt->second)) {
+      continue;
+    }
+    const size_t blockStart = pose * (d + 1);
+    for (unsigned c = 0; c < d + 1; ++c) {
+      A(static_cast<int>(blockStart + c),
+        static_cast<int>(blockStart + c)) += dampingIt->second;
+    }
+  }
+
+  Eigen::LDLT<Matrix> ldlt(A);
+  if (ldlt.info() != Eigen::Success) {
+    costAfter = costBefore;
+    restoreProblem();
+    return false;
+  }
+
+  Matrix direction = Matrix::Zero(X.rows(), X.cols());
+  Matrix localDelta = Matrix::Zero(X.rows(), activeCols.size());
+  for (int row = 0; row < rhs.rows(); ++row) {
+    const Vector solved = ldlt.solve(rhs.row(row).transpose());
+    if (ldlt.info() != Eigen::Success || !solved.allFinite()) {
+      costAfter = costBefore;
+      restoreProblem();
+      return false;
+    }
+    localDelta.row(row) = solved.transpose();
+  }
+
+  for (size_t pose = 0; pose < activeLocalPoses.size(); ++pose) {
+    const unsigned colStart = activeLocalPoses[pose] * (d + 1);
+    Matrix block = localDelta.block(0, pose * (d + 1), r, d + 1);
+    const double blockNorm = block.norm();
+    if (blockNorm <= 1e-14) {
+      continue;
+    }
+    if (maxBlockNorm > 0.0 && blockNorm > maxBlockNorm) {
+      block *= maxBlockNorm / blockNorm;
+    }
+    direction.block(0, colStart, r, d + 1) = block;
+    ++correctedBlocks;
+  }
+
+  if (correctedBlocks == 0 || direction.norm() <= 1e-14) {
+    costAfter = costBefore;
+    restoreProblem();
+    return false;
+  }
+
+  const Matrix XBefore = X;
+  LiftedSEManifold manifold(r, d, n);
+  double trialStep = stepSize;
+  const unsigned trials = std::max(1u, maxBacktrackingSteps + 1u);
+  for (unsigned trial = 0; trial < trials; ++trial) {
+    Matrix candidate = manifold.project(XBefore + trialStep * direction);
+    const double candidateCost = mProblemPtr->f(candidate);
+    if (!requireLocalDecrease || candidateCost <= costBefore) {
+      const double acceptedStepNorm = (candidate - XBefore).norm();
+      if (acceptedStepNorm <= 1e-14) {
+        correctedBlocks = 0;
+        stepNorm = 0.0;
+        costAfter = costBefore;
+        restoreProblem();
+        return false;
+      }
+      X = candidate;
+      costAfter = candidateCost;
+      stepNorm = acceptedStepNorm;
+      if (mParams.acceleration) {
+        XPrev = X;
+        V = X;
+        Y = X;
+        gamma = 0.0;
+        this->alpha = 0.0;
+      }
+      restoreAcceptedProblem();
+      return true;
+    }
+    trialStep *= 0.5;
+  }
+
+  correctedBlocks = 0;
+  stepNorm = 0.0;
+  costAfter = costBefore;
+  restoreProblem();
+  return false;
+}
+
+bool PGOAgent::getNeighborResidualScores(
+    unsigned neighborID, std::map<unsigned, double> &scores) {
+  unique_lock<mutex> tLock(mPosesMutex);
+  unique_lock<mutex> mLock(mMeasurementsMutex);
+  unique_lock<mutex> nLock(mNeighborPosesMutex);
+
+  scores.clear();
+  if (mState != PGOAgentState::INITIALIZED) {
+    return false;
+  }
+
+  for (const auto &m : sharedLoopClosures) {
+    if (m.r1 == mID && m.r2 == neighborID) {
+      const PoseID nID = std::make_pair(m.r2, m.p2);
+      auto KVpair = neighborPoseDict.find(nID);
+      if (KVpair == neighborPoseDict.end()) {
+        continue;
+      }
+      Matrix Xi = X.block(0, m.p1 * (d + 1), r, d + 1);
+      Matrix Xj = KVpair->second;
+      const double err = computeMeasurementError(
+          m, Xi.block(0, 0, r, d), Xi.block(0, d, r, 1),
+          Xj.block(0, 0, r, d), Xj.block(0, d, r, 1));
+      scores[m.p2] = std::max(scores[m.p2], err);
+    } else if (m.r2 == mID && m.r1 == neighborID) {
+      const PoseID nID = std::make_pair(m.r1, m.p1);
+      auto KVpair = neighborPoseDict.find(nID);
+      if (KVpair == neighborPoseDict.end()) {
+        continue;
+      }
+      Matrix Xi = KVpair->second;
+      Matrix Xj = X.block(0, m.p2 * (d + 1), r, d + 1);
+      const double err = computeMeasurementError(
+          m, Xi.block(0, 0, r, d), Xi.block(0, d, r, 1),
+          Xj.block(0, 0, r, d), Xj.block(0, d, r, 1));
+      scores[m.p1] = std::max(scores[m.p1], err);
+    }
+  }
   return true;
 }
 
 bool PGOAgent::getSharedPose(unsigned int index, Matrix &Mout) {
   if (mState != PGOAgentState::INITIALIZED) return false;
   lock_guard<mutex> lock(mPosesMutex);
-  if (index >= num_poses() + neighborSharedPoseIDs.size()) return false;
+  const unsigned maxIndex =
+      mParams.useConsensusCopies ? num_poses() + neighborSharedPoseIDs.size()
+                                 : num_poses();
+  if (index >= maxIndex) return false;
   Mout = X.block(0, index * (d + 1), r, d + 1);
   return true;
 }
@@ -157,9 +1491,11 @@ bool PGOAgent::getSharedPoseDict(PoseDict &map) {
     unsigned int index = poseid.second;
     map[poseid] = X.block(0, index * (d + 1), r, d + 1);
   }
-  for (auto &neighbor : neighborSharedPoseIDs) {
-    map[neighbor] = Y_shared.block(0, index * (d + 1), r, d + 1);
-    index++;
+  if (mParams.useConsensusCopies) {
+    for (auto &neighbor : neighborSharedPoseIDs) {
+      map[neighbor] = Y_shared.block(0, index * (d + 1), r, d + 1);
+      index++;
+    }
   }
   return true;
 }
@@ -272,18 +1608,24 @@ void PGOAgent::setPoseGraph(
     }
   }
 
-  // Create new optimization problem
-  mProblemPtr = new QuadraticProblem(num_poses() + neighborSharedPoseIDs.size(),
-                                     dimension(), relaxation_rank());
-  private_mProblemPtr =
-      new QuadraticProblem(num_poses(), dimension(), relaxation_rank());
-  shared_mProblemPtr = new QuadraticProblem(neighborSharedPoseIDs.size(),
-                                            dimension(), relaxation_rank());
-  // Robot can construct the quadratic cost matrix now, as it does not depend on
-  // neighbor values constructQMatrix();
-  construct_whole_QMatrix();
-  construct_private_QMatrix();
-  construct_shared_QMatrix();
+  // Create new optimization problem. The standard DPGO path optimizes only
+  // local poses; neighbor poses enter as fixed references through G.
+  if (mParams.useConsensusCopies) {
+    mProblemPtr =
+        new QuadraticProblem(num_poses() + neighborSharedPoseIDs.size(),
+                             dimension(), relaxation_rank());
+    private_mProblemPtr =
+        new QuadraticProblem(num_poses(), dimension(), relaxation_rank());
+    shared_mProblemPtr = new QuadraticProblem(neighborSharedPoseIDs.size(),
+                                              dimension(), relaxation_rank());
+    construct_whole_QMatrix();
+    construct_private_QMatrix();
+    construct_shared_QMatrix();
+  } else {
+    mProblemPtr =
+        new QuadraticProblem(num_poses(), dimension(), relaxation_rank());
+    constructQMatrix();
+  }
 
   // Initialize trajectory estimate in an arbitrary frame
   if (!local_init) {
@@ -829,6 +2171,8 @@ void PGOAgent::reset() {
   n = 1;
   X = Matrix::Zero(r, d + 1);
   X.block(0, 0, d, d) = Matrix::Identity(d, d);
+  localAmmPreviousX = Matrix();
+  localAmmStateInitialized = false;
 }
 
 void PGOAgent::iterate(bool doOptimization) {
@@ -844,19 +2188,283 @@ void PGOAgent::iterate(bool doOptimization) {
     // lock neighbor pose update
     unique_lock<mutex> lock(mNeighborPosesMutex);
 
-    if (!doOptimization) {
-      std::cout << "robot: " << getID() << " perform updating" << std::endl;
-
-      step1();
+    if (mParams.useConsensusCopies) {
+      if (!doOptimization) {
+        std::cout << "robot: " << getID() << " perform updating" << std::endl;
+        step1();
+      } else {
+        std::cout << "robot: " << getID() << " perform consensus"
+                  << std::endl;
+        step2();
+      }
     } else {
-      std::cout << "robot: " << getID() << " perform consensus" << std::endl;
-
-      step2();
+      if (mParams.acceleration) {
+        XPrev = X;
+        if (shouldRestart()) {
+          restartNesterovAcceleration(doOptimization);
+        } else {
+          updateGamma();
+          updateAlpha();
+          updateX(doOptimization, true);
+          updateV();
+          updateY();
+        }
+      } else {
+        updateX(doOptimization, false);
+      }
     }
-    // bool success;
-    // success = updateX_new(doOptimization);
   }
 }
+
+bool PGOAgent::refineLocalOptimization(
+    unsigned refinements, bool acceleration,
+    unsigned trustRegionIterationsOverride) {
+  if (refinements == 0 || mState != PGOAgentState::INITIALIZED) {
+    return true;
+  }
+  if (acceleration && !mParams.acceleration) {
+    return false;
+  }
+
+  unique_lock<mutex> tLock(mPosesMutex);
+  unique_lock<mutex> mLock(mMeasurementsMutex);
+  unique_lock<mutex> lock(mNeighborPosesMutex);
+
+  bool ok = true;
+  for (unsigned i = 0; i < refinements; ++i) {
+    ok = updateX(true, acceleration, trustRegionIterationsOverride) && ok;
+  }
+  return ok;
+}
+
+bool PGOAgent::iterateGuardedLocalAmm(
+    bool doOptimization, double momentum, bool requireLocalDecrease,
+    bool requireGradNonIncrease, bool compareBaseline,
+    bool requireBeatBaseline, unsigned trustRegionIterationsOverride,
+    LocalAmmIterationStats &stats) {
+  stats = LocalAmmIterationStats();
+
+  mIterationNumber++;
+  if (mState != PGOAgentState::INITIALIZED) {
+    return true;
+  }
+  if (mParams.useConsensusCopies || mParams.acceleration) {
+    return false;
+  }
+
+  unique_lock<mutex> tLock(mPosesMutex);
+  unique_lock<mutex> mLock(mMeasurementsMutex);
+  unique_lock<mutex> lock(mNeighborPosesMutex);
+
+  if (!doOptimization) {
+    return true;
+  }
+
+  const Matrix XBefore = X;
+  const bool canAttempt =
+      localAmmStateInitialized && localAmmPreviousX.rows() == X.rows() &&
+      localAmmPreviousX.cols() == X.cols() && momentum > 0.0;
+
+  if (canAttempt) {
+    if (mParams.robustCostType != RobustCostType::L2) {
+      constructQMatrix();
+    }
+    if (!constructGMatrix(neighborPoseDict)) {
+      return false;
+    }
+
+    stats.costBefore = mProblemPtr->f(XBefore);
+    stats.gradBefore = mProblemPtr->RieGradNorm(XBefore);
+    LiftedSEManifold manifold(relaxation_rank(), dimension(), num_poses());
+    const Matrix Yamm =
+        manifold.project(XBefore + momentum * (XBefore - localAmmPreviousX));
+
+    ROPTResult candidateResult;
+    const Matrix candidate = optimizeLocalQuadraticProblem(
+        mProblemPtr, Yamm, mParams, mParams.verbose, mTrustRegionInitialRadius,
+        trustRegionIterationsOverride, candidateResult);
+    const double candidateCost = mProblemPtr->f(candidate);
+    const double candidateGrad = mProblemPtr->RieGradNorm(candidate);
+    const bool finiteCandidate =
+        std::isfinite(candidateCost) && std::isfinite(candidateGrad);
+    const bool costOk =
+        !requireLocalDecrease || candidateCost <= stats.costBefore;
+    const bool gradOk =
+        !requireGradNonIncrease || candidateGrad <= stats.gradBefore;
+    const bool ammOk = finiteCandidate && costOk && gradOk;
+
+    stats.attempted = true;
+    Matrix selectedCandidate = candidate;
+    ROPTResult selectedResult = candidateResult;
+    double selectedCost = candidateCost;
+    double selectedGrad = candidateGrad;
+    bool selected = false;
+    bool selectedAmm = false;
+
+    if (compareBaseline) {
+      ROPTResult baselineResult;
+      const Matrix baselineCandidate = optimizeLocalQuadraticProblem(
+          mProblemPtr, XBefore, mParams, mParams.verbose,
+          mTrustRegionInitialRadius, trustRegionIterationsOverride,
+          baselineResult);
+      const double baselineCost = mProblemPtr->f(baselineCandidate);
+      const double baselineGrad = mProblemPtr->RieGradNorm(baselineCandidate);
+      const bool finiteBaseline =
+          std::isfinite(baselineCost) && std::isfinite(baselineGrad);
+      const bool baselineCostOk =
+          !requireLocalDecrease || baselineCost <= stats.costBefore;
+      const bool baselineGradOk =
+          !requireGradNonIncrease || baselineGrad <= stats.gradBefore;
+      const bool baselineOk =
+          finiteBaseline && baselineCostOk && baselineGradOk;
+
+      stats.baselineCompared = true;
+      stats.baselineCostAfter = baselineCost;
+      stats.baselineGradAfter = baselineGrad;
+      stats.baselineStepNorm = (baselineCandidate - XBefore).norm();
+      stats.vsBaselineCostDelta = baselineCost - candidateCost;
+      stats.vsBaselineGradDelta = baselineGrad - candidateGrad;
+
+      if (ammOk && baselineOk) {
+        const bool ammBeatsBaseline =
+            candidateCost <= baselineCost + 1e-12;
+        if (ammBeatsBaseline || !requireBeatBaseline) {
+          selected = true;
+          selectedAmm = ammBeatsBaseline;
+          if (!ammBeatsBaseline) {
+            selectedCandidate = baselineCandidate;
+            selectedResult = baselineResult;
+            selectedCost = baselineCost;
+            selectedGrad = baselineGrad;
+          }
+        } else {
+          selected = true;
+          selectedCandidate = baselineCandidate;
+          selectedResult = baselineResult;
+          selectedCost = baselineCost;
+          selectedGrad = baselineGrad;
+        }
+      } else if (ammOk && !requireBeatBaseline) {
+        selected = true;
+        selectedAmm = true;
+      } else if (baselineOk) {
+        selected = true;
+        selectedCandidate = baselineCandidate;
+        selectedResult = baselineResult;
+        selectedCost = baselineCost;
+        selectedGrad = baselineGrad;
+      }
+    } else if (ammOk) {
+      selected = true;
+      selectedAmm = true;
+    }
+
+    if (selected) {
+      X = selectedCandidate;
+      mLastOptimizationResult = selectedResult;
+      if (mAdaptiveTrustRegionRadius && mParams.algorithm == ROPTALG::RTR) {
+        const double minRadius =
+            std::max(1e-6, 1e-6 * mParams.trustRegionInitialRadius);
+        const double maxRadius =
+            std::max(mParams.trustRegionInitialRadius, minRadius);
+        if (selectedResult.rtrRejectedSteps > 0 &&
+            selectedResult.rtrAcceptedRadius > 0.0) {
+          mTrustRegionInitialRadius =
+              std::max(minRadius,
+                       std::min(maxRadius,
+                                2.0 * selectedResult.rtrAcceptedRadius));
+        } else {
+          mTrustRegionInitialRadius =
+              std::max(minRadius,
+                       std::min(maxRadius,
+                                1.25 * mTrustRegionInitialRadius));
+        }
+      }
+      stats.accepted = selectedAmm;
+      stats.ammSelected = selectedAmm;
+      stats.baselineSelected = !selectedAmm && stats.baselineCompared;
+      stats.costAfter = selectedCost;
+      stats.gradAfter = selectedGrad;
+      stats.stepNorm = (X - XBefore).norm();
+      localAmmPreviousX = XBefore;
+      localAmmStateInitialized = true;
+      return true;
+    }
+
+    X = XBefore;
+  }
+
+  const bool ok = updateX(true, false, trustRegionIterationsOverride);
+  if (ok) {
+    if (mProblemPtr != nullptr) {
+      stats.costAfter = mProblemPtr->f(X);
+      stats.gradAfter = mProblemPtr->RieGradNorm(X);
+    }
+    stats.stepNorm = (X - XBefore).norm();
+    localAmmPreviousX = XBefore;
+    localAmmStateInitialized = true;
+  }
+  return ok;
+}
+
+bool PGOAgent::refineLocalOptimizationWithNeighborModel(
+    unsigned neighborID, const PoseDict &poseDict, unsigned refinements,
+    unsigned trustRegionIterationsOverride) {
+  if (refinements == 0 || poseDict.empty() ||
+      mState != PGOAgentState::INITIALIZED) {
+    return true;
+  }
+
+  unique_lock<mutex> tLock(mPosesMutex);
+  unique_lock<mutex> mLock(mMeasurementsMutex);
+  unique_lock<mutex> lock(mNeighborPosesMutex);
+
+  PoseDict backupPoses;
+  for (const auto &it : poseDict) {
+    const PoseID nID = it.first;
+    if (nID.first != neighborID ||
+        neighborSharedPoseIDs.find(nID) == neighborSharedPoseIDs.end()) {
+      continue;
+    }
+    const auto oldIt = neighborPoseDict.find(nID);
+    if (oldIt == neighborPoseDict.end()) {
+      continue;
+    }
+    backupPoses[nID] = oldIt->second;
+    neighborPoseDict[nID] = it.second;
+  }
+
+  if (backupPoses.empty()) {
+    return true;
+  }
+
+  bool ok = true;
+  for (unsigned i = 0; i < refinements; ++i) {
+    ok = updateX(true, false, trustRegionIterationsOverride) && ok;
+  }
+  if (mParams.acceleration) {
+    XPrev = X;
+    V = X;
+    Y = X;
+    gamma = 0.0;
+    alpha = 0.0;
+  }
+
+  for (const auto &it : backupPoses) {
+    neighborPoseDict[it.first] = it.second;
+  }
+  return ok;
+}
+
+void PGOAgent::enableAdaptiveTrustRegionRadius(bool enabled) {
+  mAdaptiveTrustRegionRadius = enabled;
+  mTrustRegionInitialRadius = mParams.trustRegionInitialRadius;
+}
+
+ROPTResult PGOAgent::getLastOptimizationResult() const {
+  return mLastOptimizationResult;
+}
+
 void PGOAgent::step1() {
   RGrad_Y_shared_prev = shared_mProblemPtr->RieGrad(Y_shared);
   // update private variables
@@ -1521,7 +3129,8 @@ void PGOAgent::updateV() {
   V = manifold.project(M);
 }
 
-bool PGOAgent::updateX(bool doOptimization, bool acceleration) {
+bool PGOAgent::updateX(bool doOptimization, bool acceleration,
+                       unsigned trustRegionIterationsOverride) {
   if (!doOptimization) {
     if (acceleration) {
       X = Y;
@@ -1560,15 +3169,6 @@ bool PGOAgent::updateX(bool doOptimization, bool acceleration) {
     return false;
   }
 
-  // Initialize optimizer
-  QuadraticOptimizer optimizer(mProblemPtr);
-  optimizer.setVerbose(mParams.verbose);
-  optimizer.setAlgorithm(mParams.algorithm);
-  optimizer.setTrustRegionTolerance(1e-2);  // Force optimizer to make progress
-  optimizer.setTrustRegionIterations(1);
-  optimizer.setTrustRegionMaxInnerIterations(10);
-  optimizer.setTrustRegionInitialRadius(100);
-
   // Starting solution
   Matrix XInit;
   if (acceleration) {
@@ -1580,12 +3180,30 @@ bool PGOAgent::updateX(bool doOptimization, bool acceleration) {
   assert(XInit.cols() == (dimension() + 1) * num_poses());
 
   // Optimize!
-  X = optimizer.optimize(XInit);
+  ROPTResult result;
+  X = optimizeLocalQuadraticProblem(
+      mProblemPtr, XInit, mParams, mParams.verbose, mTrustRegionInitialRadius,
+      trustRegionIterationsOverride, result);
   assert(X.rows() == relaxation_rank());
   assert(X.cols() == (dimension() + 1) * num_poses());
 
   // Print optimization statistics
-  const auto &result = optimizer.getOptResult();
+  mLastOptimizationResult = result;
+  if (mAdaptiveTrustRegionRadius && mParams.algorithm == ROPTALG::RTR) {
+    const double minRadius =
+        std::max(1e-6, 1e-6 * mParams.trustRegionInitialRadius);
+    const double maxRadius =
+        std::max(mParams.trustRegionInitialRadius, minRadius);
+    if (result.rtrRejectedSteps > 0 && result.rtrAcceptedRadius > 0.0) {
+      mTrustRegionInitialRadius =
+          std::max(minRadius,
+                   std::min(maxRadius, 2.0 * result.rtrAcceptedRadius));
+    } else {
+      mTrustRegionInitialRadius =
+          std::max(minRadius,
+                   std::min(maxRadius, 1.25 * mTrustRegionInitialRadius));
+    }
+  }
   if (mParams.verbose) {
     printf("df: %f, gn0: %f, gn1: %f, df/gn0: %f\n", result.fInit - result.fOpt,
            result.gradNormInit, result.gradNormOpt,
@@ -1707,8 +3325,7 @@ void PGOAgent::consensus_step(double stepsize, int num_iter) {
   // go through seperator
   double finit = shared_mProblemPtr->f(Y_shared);
   size_t cnt = 0;
-  
- 
+
   for (const auto &neighbor : neighborSharedPoseIDs) {
     Matrix gradR = Matrix::Zero(3, 3);
     Vector gradt = Vector::Zero(3);

@@ -43,6 +43,12 @@ void QuadraticProblem::setQ(const SparseMatrix &QIn) {
   solver.compute(P);
 }
 
+void QuadraticProblem::setQWithoutPreconditioner(const SparseMatrix &QIn) {
+  assert((unsigned) QIn.rows() == (d + 1) * n);
+  assert((unsigned) QIn.cols() == (d + 1) * n);
+  mQ = QIn;
+}
+
 void QuadraticProblem::setG(const SparseMatrix &GIn) {
   assert((unsigned) GIn.rows() == r);
   assert((unsigned) GIn.cols() == (d + 1) * n);
@@ -58,6 +64,16 @@ double QuadraticProblem::f(const Matrix &Y) const {
 }
 double QuadraticProblem::get_scondf(const Matrix &Y)const{
   return (Y.cwiseProduct(mG)).sum();
+}
+
+std::pair<double, double> QuadraticProblem::fAndRieGradNorm(
+    const Matrix &Y) const {
+  assert((unsigned) Y.rows() == r);
+  assert((unsigned) Y.cols() == (d + 1) * n);
+  const Matrix YQ = Y * mQ;
+  const double objective =
+      0.5 * (YQ.cwiseProduct(Y)).sum() + (Y.cwiseProduct(mG)).sum();
+  return {objective, projectLiftedSETangent(Y, YQ + mG).norm()};
 }
 
 double QuadraticProblem::f(ROPTLIB::Variable *x) const {
@@ -93,13 +109,9 @@ void QuadraticProblem::PreConditioner(ROPTLIB::Variable *x,
 }
 
 Matrix QuadraticProblem::RieGrad(const Matrix &Y) const {
-  LiftedSEVariable Var(r, d, n);
-  Var.setData(Y);
-  LiftedSEVector EGrad(r, d, n);
-  LiftedSEVector RGrad(r, d, n);
-  EucGrad(Var.var(), EGrad.vec());
-  M->getManifold()->Projection(Var.var(), EGrad.vec(), RGrad.vec());
-  return RGrad.getData();
+  assert((unsigned) Y.rows() == r);
+  assert((unsigned) Y.cols() == (d + 1) * n);
+  return projectLiftedSETangent(Y, Y * mQ + mG);
 }
 
 // Matrix QuadraticProblem::vectransport(const Matrix &X,const Matrix &Y,const Matrix &xix){
@@ -115,6 +127,29 @@ Matrix QuadraticProblem::RieGrad(const Matrix &Y) const {
 // }
 double QuadraticProblem::RieGradNorm(const Matrix &Y) const {
   return RieGrad(Y).norm();
+}
+
+Matrix QuadraticProblem::projectLiftedSETangent(const Matrix &Y,
+                                                const Matrix &Z) const {
+  assert((unsigned) Y.rows() == r);
+  assert((unsigned) Y.cols() == (d + 1) * n);
+  assert(Z.rows() == Y.rows());
+  assert(Z.cols() == Y.cols());
+  Matrix projected = Z;
+  for (size_t pose = 0; pose < n; ++pose) {
+    const size_t colStart = pose * (d + 1);
+    const auto R =
+        Y.block(0, static_cast<int>(colStart), static_cast<int>(r),
+                static_cast<int>(d));
+    const auto ZR =
+        Z.block(0, static_cast<int>(colStart), static_cast<int>(r),
+                static_cast<int>(d));
+    Matrix sym = R.transpose() * ZR;
+    sym = (0.5 * (sym + sym.transpose())).eval();
+    projected.block(0, static_cast<int>(colStart), static_cast<int>(r),
+                    static_cast<int>(d)) = ZR - R * sym;
+  }
+  return projected;
 }
 
 Matrix QuadraticProblem::readElement(const ROPTLIB::Element *element) const {

@@ -36,6 +36,7 @@ QuadraticOptimizer::~QuadraticOptimizer() = default;
 
 Matrix QuadraticOptimizer::optimize(const Matrix &Y) {
   // Compute statistics before optimization
+  result = ROPTResult();
   result.fInit = problem->f(Y);
   result.gradNormInit = problem->RieGradNorm(Y);
   auto startTime = std::chrono::high_resolution_clock::now();
@@ -106,19 +107,28 @@ Matrix QuadraticOptimizer::trustRegion(const Matrix &Yinit) {
       Solver.maximum_Delta = radius;
       Solver.Run();
       if (Solver.latestStepAccepted()) {
+        result.rtrAcceptedRadius = radius;
+        result.rtrRejectedSteps = static_cast<unsigned>(total_steps);
         break;
       } else if (total_steps > 10) {
-        printf("Too many RTR rejections. Returning initial guess.\n");
+        if (verbose) {
+          printf("Too many RTR rejections. Returning initial guess.\n");
+        }
+        result.rtrRejectedSteps = static_cast<unsigned>(total_steps);
+        result.rtrAcceptedRadius = radius;
         return Yinit;
       } else {
         radius = radius / 4;
         total_steps++;
-        printf("RTR step rejected. Shrinking trust-region radius to %f.\n",
-               radius);
+        if (verbose) {
+          printf("RTR step rejected. Shrinking trust-region radius to %f.\n",
+                 radius);
+        }
       }
     }
   } else {
     Solver.Run();
+    result.rtrAcceptedRadius = Solver.initial_Delta;
   }
   // record tCG status
   result.tCGStatus = Solver.gettCGStatus();

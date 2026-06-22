@@ -16,6 +16,7 @@
 #include <Eigen/CholmodSupport>
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
+#include <utility>
 #include <vector>
 
 #include "Problems/Problem.h"
@@ -45,12 +46,21 @@ class QuadraticProblem : public ROPTLIB::Problem {
 
   /** get quadratic cost matrix */
   SparseMatrix getQ() const { return mQ; }
+  const SparseMatrix &getQRef() const { return mQ; }
 
   /** get linear cost matrix */
   SparseMatrix getG() const { return mG; }
+  const SparseMatrix &getGRef() const { return mG; }
 
   /** set quadratic cost matrix */
   void setQ(const SparseMatrix &QIn);
+
+  /**
+   * Set the quadratic cost matrix without rebuilding the ROPTLIB
+   * preconditioner. This is intended for handwritten solvers that only use
+   * f/RieGrad/HessianEta and manage their own local preconditioners.
+   */
+  void setQWithoutPreconditioner(const SparseMatrix &QIn);
 
   /** set linear cost matrix */
   void setG(const SparseMatrix &GIn);
@@ -62,6 +72,14 @@ class QuadraticProblem : public ROPTLIB::Problem {
    */
   double f(const Matrix &Y) const;
   double get_scondf(const Matrix &Y)const;
+
+  /**
+   * @brief Evaluate objective and Riemannian gradient norm with one sparse
+   * matrix multiply.
+   * @param Y current point on the manifold (matrix form)
+   * @return {objective, Riemannian gradient norm}
+   */
+  std::pair<double, double> fAndRieGradNorm(const Matrix &Y) const;
 
   /**
    * @brief Evaluate objective function
@@ -109,6 +127,8 @@ class QuadraticProblem : public ROPTLIB::Problem {
   double RieGradNorm(const Matrix &Y) const;
 
  private:
+  Matrix projectLiftedSETangent(const Matrix &Y, const Matrix &Z) const;
+
   // Number of poses
   const size_t n = 0;
 

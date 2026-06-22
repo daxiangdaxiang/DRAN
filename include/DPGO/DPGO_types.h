@@ -55,6 +55,9 @@ struct ROPTResult {
   double gradNormOpt;     // Gradient norm after optimization
   double relativeChange;  // Relative change in solution
   double elapsedMs;       // elapsed time in milliseconds
+  unsigned rtrAcceptedIterations{0};
+  unsigned rtrRejectedSteps{0};
+  double rtrAcceptedRadius{0.0};
   ROPTLIB::tCGstatusSet tCGStatus;  // status of truncated conjugate gradient (only used by trust region solver)
 };
 
