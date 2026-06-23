@@ -344,6 +344,50 @@ Matrix normalEquationRhs(const InterfaceProblem &problem) {
   return rhs;
 }
 
+std::vector<int> asyncRobotIds(const InterfaceProblem &problem) {
+  std::set<int> robots;
+  for (const auto &key : problem.variables) {
+    if (key.robot_id >= 0) {
+      robots.insert(key.robot_id);
+    }
+  }
+  for (const auto &factor : problem.factors) {
+    if (factor.owner_robot >= 0) {
+      robots.insert(factor.owner_robot);
+    }
+  }
+  if (robots.empty()) {
+    robots.insert(0);
+  }
+  return std::vector<int>(robots.begin(), robots.end());
+}
+
+bool factorInsideRobots(const InterfaceFactor &factor,
+                        const std::set<int> &robots) {
+  if (factor.scope.empty()) {
+    return factor.owner_robot < 0 || robots.count(factor.owner_robot) != 0;
+  }
+  for (const auto &key : factor.scope) {
+    if (robots.count(key.robot_id) == 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::size_t asyncBlockMessageBytes(std::size_t num_keys, int block_dim,
+                                   int rhs_dim, bool include_diagonal) {
+  std::size_t bytes = sizeof(int) * 4u + sizeof(std::uint64_t) +
+                      num_keys * 2u * sizeof(int) +
+                      num_keys * static_cast<std::size_t>(block_dim) *
+                          static_cast<std::size_t>(rhs_dim) * sizeof(double);
+  if (include_diagonal) {
+    bytes += num_keys * static_cast<std::size_t>(block_dim) *
+             static_cast<std::size_t>(block_dim) * sizeof(double);
+  }
+  return bytes;
+}
+
 std::size_t estimatedMessageBytesForSeparator(std::size_t separatorBlocks,
                                               int blockDim, int rhsDim) {
   const std::size_t sepDim = separatorBlocks * static_cast<std::size_t>(blockDim);
@@ -1601,6 +1645,548 @@ Vector RIFTCAKSolver::Solve(const InterfaceProblem &problem,
   return SolveMatrix(problem, params, stats, guard).col(0);
 }
 
+RIFTAsyncSchurSolver::RIFTAsyncSchurSolver(const InterfaceProblem &problem,
+                                           const RIFTParams &params,
+                                           std::uint64_t seed)
+    : problem_(problem), params_(params), network_(seed) {
+  if (problem_.block_dim <= 0 || problem_.rhs_dim <= 0) {
+    throw std::invalid_argument(
+        "RIFT async Schur problem dimensions must be positive");
+  }
+  if (params_.async_schur_max_iters < 0) {
+    throw std::invalid_argument(
+        "RIFT async Schur max iterations must be nonnegative");
+  }
+  if (!std::isfinite(params_.async_schur_rel_tol) ||
+      params_.async_schur_rel_tol < 0.0) {
+    throw std::invalid_argument(
+        "RIFT async Schur tolerance must be finite and nonnegative");
+  }
+  if (!std::isfinite(params_.async_schur_relaxation) ||
+      params_.async_schur_relaxation <= 0.0 ||
+      params_.async_schur_relaxation > 1.0) {
+    throw std::invalid_argument(
+        "RIFT async Schur relaxation must be in (0, 1]");
+  }
+  if (!std::isfinite(params_.async_schur_damping) ||
+      params_.async_schur_damping < 0.0) {
+    throw std::invalid_argument(
+        "RIFT async Schur damping must be finite and nonnegative");
+  }
+
+  robots_ = asyncRobotIds(problem_);
+  for (const int robot : robots_) {
+    network_.AddRobot(robot);
+    value_cache_by_robot_[robot] =
+        std::vector<Matrix>(problem_.variables.size(),
+                            Matrix::Zero(problem_.block_dim,
+                                         problem_.rhs_dim));
+  }
+  for (std::size_t i = 0; i < robots_.size(); ++i) {
+    for (std::size_t j = i + 1; j < robots_.size(); ++j) {
+      RIFTLinkModel link;
+      network_.AddLink(robots_[i], robots_[j], link);
+    }
+  }
+
+  for (std::size_t key_index = 0; key_index < problem_.variables.size();
+       ++key_index) {
+    const int owner = problem_.variables[key_index].robot_id;
+    owned_key_indices_[owner].push_back(static_cast<int>(key_index));
+  }
+  values_ = Matrix::Zero(
+      static_cast<int>(problem_.variables.size()) * problem_.block_dim,
+      problem_.rhs_dim);
+  for (const int robot : robots_) {
+    for (const int key_index : owned_key_indices_[robot]) {
+      value_cache_by_robot_[robot][key_index] =
+          values_.block(key_index * problem_.block_dim, 0,
+                        problem_.block_dim, problem_.rhs_dim);
+    }
+  }
+  initial_residual_ = GlobalResidualNorm();
+}
+
+void RIFTAsyncSchurSolver::SetLinkModel(int a, int b,
+                                        const RIFTLinkModel &model) {
+  if (network_.HasLink(a, b)) {
+    if (!network_.LinkUp(a, b)) {
+      network_.RestoreLink(a, b);
+    }
+  }
+  network_.AddLink(a, b, model);
+}
+
+void RIFTAsyncSchurSolver::DropLink(int a, int b) {
+  network_.DropLink(a, b);
+}
+
+void RIFTAsyncSchurSolver::RestoreLink(int a, int b) {
+  const int before = static_cast<int>(ConnectedComponents().size());
+  network_.RestoreLink(a, b);
+  const int after = static_cast<int>(ConnectedComponents().size());
+  if (after < before) {
+    ++reconnect_merges_;
+  }
+}
+
+std::vector<int> RIFTAsyncSchurSolver::ReachableComponent(
+    int robot_id) const {
+  std::set<int> visited;
+  std::queue<int> queue;
+  visited.insert(robot_id);
+  queue.push(robot_id);
+  while (!queue.empty()) {
+    const int current = queue.front();
+    queue.pop();
+    for (const int other : robots_) {
+      if (visited.count(other) != 0 || current == other) {
+        continue;
+      }
+      if (network_.HasLink(current, other) && network_.LinkUp(current, other)) {
+        visited.insert(other);
+        queue.push(other);
+      }
+    }
+  }
+  return std::vector<int>(visited.begin(), visited.end());
+}
+
+std::vector<std::vector<int>> RIFTAsyncSchurSolver::ConnectedComponents()
+    const {
+  std::set<int> remaining(robots_.begin(), robots_.end());
+  std::vector<std::vector<int>> components;
+  while (!remaining.empty()) {
+    const int root = *remaining.begin();
+    std::vector<int> component = ReachableComponent(root);
+    for (const int robot : component) {
+      remaining.erase(robot);
+    }
+    components.push_back(std::move(component));
+  }
+  return components;
+}
+
+void RIFTAsyncSchurSolver::DeliverReadyMessages() {
+  const auto delivered = network_.DeliverReady(current_time_ms_);
+  for (const auto &event : delivered) {
+    const RIFTNetworkMessage &network_message = event.message;
+    const RIFTMessage &message = network_message.rift_message;
+    const int sender = network_message.src_robot;
+    const int receiver = network_message.dst_robot;
+    const bool is_gradient = message.R.rows() > 0;
+    const int message_type = is_gradient ? 1 : 0;
+    const std::uint64_t seq =
+        std::max(network_message.seq, message.header.seq);
+    for (std::size_t local = 0; local < message.separator_keys.size();
+         ++local) {
+      const InterfaceKey &key = message.separator_keys[local];
+      const auto key_it = std::find(problem_.variables.begin(),
+                                    problem_.variables.end(), key);
+      if (key_it == problem_.variables.end()) {
+        continue;
+      }
+      const int key_index =
+          static_cast<int>(std::distance(problem_.variables.begin(), key_it));
+      const auto seq_key =
+          std::make_tuple(message_type, receiver, sender, key_index);
+      if (last_message_seq_[seq_key] >= seq) {
+        ++stale_messages_rejected_;
+        continue;
+      }
+      last_message_seq_[seq_key] = seq;
+      const int row = static_cast<int>(local) * problem_.block_dim;
+      if (is_gradient) {
+        gradient_cache_[{sender, key_index}] =
+            message.D.block(row, 0, problem_.block_dim, problem_.rhs_dim);
+        diagonal_cache_[{sender, key_index}] =
+            message.R.block(row, 0, problem_.block_dim, problem_.block_dim);
+      } else {
+        value_cache_by_robot_[receiver][key_index] =
+            message.D.block(row, 0, problem_.block_dim, problem_.rhs_dim);
+      }
+    }
+  }
+}
+
+void RIFTAsyncSchurSolver::BroadcastState(int robot_id) {
+  const auto owned = owned_key_indices_.find(robot_id);
+  if (owned == owned_key_indices_.end() || owned->second.empty()) {
+    return;
+  }
+  RIFTMessage message;
+  message.header.stage = problem_.stage;
+  message.header.src = robot_id;
+  message.header.seq = next_seq_;
+  message.separator_keys.reserve(owned->second.size());
+  message.R = Matrix::Zero(0, 0);
+  message.D = Matrix::Zero(
+      static_cast<int>(owned->second.size()) * problem_.block_dim,
+      problem_.rhs_dim);
+  for (std::size_t local = 0; local < owned->second.size(); ++local) {
+    const int key_index = owned->second[local];
+    message.separator_keys.push_back(problem_.variables[key_index]);
+    message.D.block(static_cast<int>(local) * problem_.block_dim, 0,
+                    problem_.block_dim, problem_.rhs_dim) =
+        values_.block(key_index * problem_.block_dim, 0, problem_.block_dim,
+                      problem_.rhs_dim);
+  }
+  for (const int receiver : robots_) {
+    if (receiver == robot_id || !network_.HasLink(robot_id, receiver) ||
+        !network_.LinkUp(robot_id, receiver)) {
+      continue;
+    }
+    RIFTNetworkMessage network_message;
+    network_message.src_robot = robot_id;
+    network_message.dst_robot = receiver;
+    network_message.seq = next_seq_++;
+    network_message.payload_bytes = asyncBlockMessageBytes(
+        owned->second.size(), problem_.block_dim, problem_.rhs_dim,
+        /*include_diagonal=*/false);
+    message_bytes_ += network_message.payload_bytes;
+    ++message_count_;
+    if (guard_ != nullptr) {
+      guard_->RecordMessage(robot_id, receiver,
+                            network_message.payload_bytes);
+    }
+    network_message.send_time_ms = current_time_ms_;
+    network_message.rift_message = message;
+    network_message.rift_message.header.dst = receiver;
+    network_message.rift_message.header.seq = network_message.seq;
+    network_.Send(std::move(network_message));
+  }
+}
+
+void RIFTAsyncSchurSolver::BroadcastFactorGradients(
+    int robot_id, const std::vector<int> &component) {
+  const std::set<int> component_set(component.begin(), component.end());
+  std::map<int, std::vector<int>> key_indices_by_owner;
+  std::map<int, Matrix> gradient_by_key;
+  std::map<int, Matrix> diagonal_by_key;
+
+  for (const auto &factor : problem_.factors) {
+    if (factor.owner_robot != robot_id ||
+        !factorInsideRobots(factor, component_set)) {
+      continue;
+    }
+    Matrix Xscope(factor.A.cols(), problem_.rhs_dim);
+    for (std::size_t local = 0; local < factor.scope.size(); ++local) {
+      const int key_index = keyOffset(problem_.variables, factor.scope[local],
+                                      problem_.block_dim) /
+                            problem_.block_dim;
+      const int row = static_cast<int>(local) * problem_.block_dim;
+      Xscope.block(row, 0, problem_.block_dim, problem_.rhs_dim) =
+          factor.scope[local].robot_id == robot_id
+              ? values_.block(key_index * problem_.block_dim, 0,
+                              problem_.block_dim, problem_.rhs_dim)
+              : value_cache_by_robot_[robot_id][key_index];
+    }
+    const Matrix residual = factor.A * Xscope - factor.B;
+    for (std::size_t local = 0; local < factor.scope.size(); ++local) {
+      const int key_index = keyOffset(problem_.variables, factor.scope[local],
+                                      problem_.block_dim) /
+                            problem_.block_dim;
+      const int col = static_cast<int>(local) * problem_.block_dim;
+      const Matrix Ablock = factor.A.block(0, col, factor.A.rows(),
+                                           problem_.block_dim);
+      if (gradient_by_key.count(key_index) == 0) {
+        gradient_by_key[key_index] =
+            Matrix::Zero(problem_.block_dim, problem_.rhs_dim);
+        diagonal_by_key[key_index] =
+            Matrix::Zero(problem_.block_dim, problem_.block_dim);
+      }
+      gradient_by_key[key_index] += Ablock.transpose() * residual;
+      diagonal_by_key[key_index] += Ablock.transpose() * Ablock;
+    }
+  }
+
+  for (const auto &entry : gradient_by_key) {
+    const int key_index = entry.first;
+    const int owner = problem_.variables[key_index].robot_id;
+    key_indices_by_owner[owner].push_back(key_index);
+  }
+
+  for (const auto &entry : key_indices_by_owner) {
+    const int receiver = entry.first;
+    const auto &keys = entry.second;
+    if (keys.empty()) {
+      continue;
+    }
+    RIFTMessage message;
+    message.header.stage = problem_.stage;
+    message.header.src = robot_id;
+    message.header.dst = receiver;
+    message.header.seq = next_seq_;
+    message.separator_keys.reserve(keys.size());
+    message.R = Matrix::Zero(static_cast<int>(keys.size()) *
+                                 problem_.block_dim,
+                             problem_.block_dim);
+    message.D = Matrix::Zero(static_cast<int>(keys.size()) *
+                                 problem_.block_dim,
+                             problem_.rhs_dim);
+    for (std::size_t local = 0; local < keys.size(); ++local) {
+      const int key_index = keys[local];
+      const int row = static_cast<int>(local) * problem_.block_dim;
+      message.separator_keys.push_back(problem_.variables[key_index]);
+      message.R.block(row, 0, problem_.block_dim, problem_.block_dim) =
+          diagonal_by_key[key_index];
+      message.D.block(row, 0, problem_.block_dim, problem_.rhs_dim) =
+          gradient_by_key[key_index];
+    }
+
+    if (receiver == robot_id) {
+      for (std::size_t local = 0; local < keys.size(); ++local) {
+        const int key_index = keys[local];
+        const int row = static_cast<int>(local) * problem_.block_dim;
+        gradient_cache_[{robot_id, key_index}] =
+            message.D.block(row, 0, problem_.block_dim, problem_.rhs_dim);
+        diagonal_cache_[{robot_id, key_index}] =
+            message.R.block(row, 0, problem_.block_dim, problem_.block_dim);
+      }
+      continue;
+    }
+    if (!network_.HasLink(robot_id, receiver) ||
+        !network_.LinkUp(robot_id, receiver)) {
+      continue;
+    }
+    RIFTNetworkMessage network_message;
+    network_message.src_robot = robot_id;
+    network_message.dst_robot = receiver;
+    network_message.seq = next_seq_++;
+    network_message.payload_bytes = asyncBlockMessageBytes(
+        keys.size(), problem_.block_dim, problem_.rhs_dim,
+        /*include_diagonal=*/true);
+    message_bytes_ += network_message.payload_bytes;
+    ++message_count_;
+    if (guard_ != nullptr) {
+      guard_->RecordMessage(robot_id, receiver,
+                            network_message.payload_bytes);
+    }
+    network_message.send_time_ms = current_time_ms_;
+    network_message.rift_message = std::move(message);
+    network_message.rift_message.header.seq = network_message.seq;
+    network_.Send(std::move(network_message));
+  }
+}
+
+void RIFTAsyncSchurSolver::StepRobot(int robot_id) {
+  DeliverReadyMessages();
+  const std::vector<int> component = ReachableComponent(robot_id);
+  const std::set<int> component_set(component.begin(), component.end());
+  BroadcastFactorGradients(robot_id, component);
+  DeliverReadyMessages();
+
+  const auto owned = owned_key_indices_.find(robot_id);
+  if (owned != owned_key_indices_.end()) {
+    for (const int key_index : owned->second) {
+      Matrix gradient = Matrix::Zero(problem_.block_dim, problem_.rhs_dim);
+      Matrix diagonal = params_.async_schur_damping *
+                        Matrix::Identity(problem_.block_dim,
+                                         problem_.block_dim);
+      for (const int factor_robot : component) {
+        const auto grad = gradient_cache_.find({factor_robot, key_index});
+        const auto diag = diagonal_cache_.find({factor_robot, key_index});
+        if (grad != gradient_cache_.end()) {
+          gradient += grad->second;
+        }
+        if (diag != diagonal_cache_.end()) {
+          diagonal += diag->second;
+        }
+      }
+      if (diagonal.norm() == 0.0) {
+        continue;
+      }
+      Eigen::ColPivHouseholderQR<Matrix> qr(diagonal);
+      const Matrix step = qr.solve(-gradient);
+      values_.block(key_index * problem_.block_dim, 0, problem_.block_dim,
+                    problem_.rhs_dim) += params_.async_schur_relaxation * step;
+      value_cache_by_robot_[robot_id][key_index] =
+          values_.block(key_index * problem_.block_dim, 0, problem_.block_dim,
+                        problem_.rhs_dim);
+    }
+  }
+  BroadcastState(robot_id);
+  current_time_ms_ += 1.0;
+}
+
+void RIFTAsyncSchurSolver::Run(int max_iterations) {
+  for (int iter = 0; iter < max_iterations && !GlobalConverged(); ++iter) {
+    for (const int robot : robots_) {
+      StepRobot(robot);
+    }
+    ++iterations_;
+  }
+  current_time_ms_ += 1000.0;
+  DeliverReadyMessages();
+}
+
+Matrix RIFTAsyncSchurSolver::Solution() const {
+  return values_;
+}
+
+double RIFTAsyncSchurSolver::GlobalResidualNorm() const {
+  std::set<int> all_robots(robots_.begin(), robots_.end());
+  std::vector<int> all_component(all_robots.begin(), all_robots.end());
+  return ComponentResidualNorm(all_component);
+}
+
+double RIFTAsyncSchurSolver::ComponentResidualNorm(
+    const std::vector<int> &component) const {
+  const std::set<int> component_set(component.begin(), component.end());
+  Matrix gradient = Matrix::Zero(values_.rows(), values_.cols());
+  for (const auto &factor : problem_.factors) {
+    if (!factorInsideRobots(factor, component_set)) {
+      continue;
+    }
+    Matrix X(factor.A.cols(), problem_.rhs_dim);
+    for (std::size_t k = 0; k < factor.scope.size(); ++k) {
+      const int globalOffset =
+          keyOffset(problem_.variables, factor.scope[k], problem_.block_dim);
+      const int localOffset = static_cast<int>(k) * problem_.block_dim;
+      X.block(localOffset, 0, problem_.block_dim, problem_.rhs_dim) =
+          values_.block(globalOffset, 0, problem_.block_dim,
+                        problem_.rhs_dim);
+    }
+    const Matrix localGradient = factor.A.transpose() * (factor.A * X -
+                                                         factor.B);
+    for (std::size_t k = 0; k < factor.scope.size(); ++k) {
+      const int globalOffset =
+          keyOffset(problem_.variables, factor.scope[k], problem_.block_dim);
+      const int localOffset = static_cast<int>(k) * problem_.block_dim;
+      gradient.block(globalOffset, 0, problem_.block_dim, problem_.rhs_dim) +=
+          localGradient.block(localOffset, 0, problem_.block_dim,
+                              problem_.rhs_dim);
+    }
+  }
+  double squared = 0.0;
+  for (std::size_t key_index = 0; key_index < problem_.variables.size();
+       ++key_index) {
+    if (component_set.count(problem_.variables[key_index].robot_id) == 0) {
+      continue;
+    }
+    squared += gradient
+                   .block(static_cast<int>(key_index) * problem_.block_dim, 0,
+                          problem_.block_dim, problem_.rhs_dim)
+                   .squaredNorm();
+  }
+  return std::sqrt(squared);
+}
+
+bool RIFTAsyncSchurSolver::ComponentConverged(
+    const std::vector<int> &component) const {
+  const std::set<int> component_set(component.begin(), component.end());
+  Matrix gradient = Matrix::Zero(values_.rows(), values_.cols());
+  for (const auto &factor : problem_.factors) {
+    if (factorInsideRobots(factor, component_set)) {
+      const Matrix localGradient = -factor.A.transpose() * factor.B;
+      for (std::size_t k = 0; k < factor.scope.size(); ++k) {
+        const int globalOffset =
+            keyOffset(problem_.variables, factor.scope[k], problem_.block_dim);
+        const int localOffset = static_cast<int>(k) * problem_.block_dim;
+        gradient.block(globalOffset, 0, problem_.block_dim, problem_.rhs_dim) +=
+            localGradient.block(localOffset, 0, problem_.block_dim,
+                                problem_.rhs_dim);
+      }
+    }
+  }
+  double initial_squared = 0.0;
+  for (std::size_t key_index = 0; key_index < problem_.variables.size();
+       ++key_index) {
+    if (component_set.count(problem_.variables[key_index].robot_id) == 0) {
+      continue;
+    }
+    initial_squared +=
+        gradient
+            .block(static_cast<int>(key_index) * problem_.block_dim, 0,
+                   problem_.block_dim, problem_.rhs_dim)
+            .squaredNorm();
+  }
+  const double initial = std::sqrt(initial_squared);
+  const double gate = params_.async_schur_rel_tol * std::max(1.0, initial);
+  return ComponentResidualNorm(component) <= gate;
+}
+
+bool RIFTAsyncSchurSolver::GlobalConverged() const {
+  const double gate =
+      params_.async_schur_rel_tol * std::max(1.0, initial_residual_);
+  return GlobalResidualNorm() <= gate;
+}
+
+bool RIFTAsyncSchurSolver::ComponentConsistent() const {
+  const auto components = ConnectedComponents();
+  if (components.empty()) {
+    return true;
+  }
+  for (const auto &component : components) {
+    if (!ComponentConverged(component)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+Matrix RIFTAsyncSchurSolver::SolveMatrix(const InterfaceProblem &problem,
+                                         const RIFTParams &params,
+                                         RIFTStats *stats,
+                                         DecentralizationGuard *guard) {
+  RIFTAsyncSchurSolver solver(problem, params);
+  solver.guard_ = guard;
+  RIFTStats localStats;
+  localStats.selected_backend = RIFTInterfaceBackend::RIFT_ASYNC_SCHUR;
+  localStats.num_host_robots = static_cast<int>(solver.robots_.size());
+  localStats.async_schur_initial_residual = solver.GlobalResidualNorm();
+
+  localStats.message_qr_ms += elapsedMilliseconds([&]() {
+    solver.Run(params.async_schur_max_iters);
+  });
+
+  localStats.async_schur_iterations = solver.iterations();
+  localStats.async_schur_final_residual = solver.GlobalResidualNorm();
+  localStats.async_schur_converged = solver.GlobalConverged();
+  localStats.async_schur_components =
+      static_cast<int>(solver.ConnectedComponents().size());
+  localStats.async_schur_component_consistent = solver.ComponentConsistent();
+  localStats.async_schur_global_consistent =
+      localStats.async_schur_components == 1 &&
+      localStats.async_schur_converged;
+  localStats.async_schur_stale_messages_rejected =
+      solver.stale_messages_rejected();
+  localStats.async_schur_reconnect_merges = solver.reconnect_merges();
+  localStats.final_interface_residual =
+      interfaceResidualNorm(problem, solver.Solution());
+  localStats.actual_message_bytes = solver.message_bytes_;
+  localStats.directed_messages_sent = solver.message_count_;
+  if (guard != nullptr) {
+    if (params.forbid_global_interface_matrix) {
+      guard->AssertNoGlobalInterfaceMatrixConstructed();
+    }
+    if (params.forbid_direct_solver_in_deployment) {
+      guard->AssertNoDirectSolverCalled();
+    }
+    if (params.forbid_collectives) {
+      guard->AssertNoCollectiveCommunication();
+    }
+    localStats.used_global_matrix = guard->used_global_matrix();
+    localStats.used_direct_solver = guard->used_direct_solver();
+    localStats.used_collective = guard->used_collective();
+  }
+  if (stats != nullptr) {
+    *stats = localStats;
+  }
+  return solver.Solution();
+}
+
+Vector RIFTAsyncSchurSolver::Solve(const InterfaceProblem &problem,
+                                   const RIFTParams &params,
+                                   RIFTStats *stats,
+                                   DecentralizationGuard *guard) {
+  if (problem.rhs_dim != 1) {
+    throw std::invalid_argument(
+        "RIFT async Schur vector Solve requires a single RHS; use SolveMatrix");
+  }
+  return SolveMatrix(problem, params, stats, guard).col(0);
+}
+
 Matrix SolveInterfaceProblemWithRIFTExact(
     const InterfaceProblem &problem, const TEDCCIParams &params,
     TEDCCIStats *stats) {
@@ -1609,10 +2195,6 @@ Matrix SolveInterfaceProblemWithRIFTExact(
   if (riftParams.backend == RIFTInterfaceBackend::DIRECT_ORACLE) {
     throw std::invalid_argument(
         "RIFT-IF deployment mode requires rift_exact or rift_auto backend");
-  }
-  if (riftParams.backend == RIFTInterfaceBackend::RIFT_ASYNC_SCHUR) {
-    throw std::invalid_argument(
-        "RIFT-IF requested backend is not implemented in this MVP");
   }
   riftParams.exact_max_separator_blocks_2d =
       params.rift_exact_max_separator_blocks_2d;
@@ -1625,6 +2207,9 @@ Matrix SolveInterfaceProblemWithRIFTExact(
   riftParams.forbid_global_interface_matrix =
       params.rift_forbid_global_interface_matrix;
   riftParams.forbid_collectives = params.rift_forbid_collectives;
+  riftParams.async_schur_max_iters =
+      std::max(riftParams.async_schur_max_iters, params.async_dd_max_iters);
+  riftParams.async_schur_rel_tol = params.async_dd_rel_tol;
 
   RIFTStats riftStats;
   double symbolicMs = 0.0;
@@ -1633,6 +2218,9 @@ Matrix SolveInterfaceProblemWithRIFTExact(
   if (riftParams.backend == RIFTInterfaceBackend::RIFT_CAK) {
     solution = RIFTCAKSolver::SolveMatrix(problem, riftParams, &riftStats,
                                           &guard);
+  } else if (riftParams.backend == RIFTInterfaceBackend::RIFT_ASYNC_SCHUR) {
+    solution = RIFTAsyncSchurSolver::SolveMatrix(problem, riftParams,
+                                                 &riftStats, &guard);
   } else {
     InterfaceCliqueTree tree;
     symbolicMs = elapsedMilliseconds([&]() {
@@ -1656,6 +2244,11 @@ Matrix SolveInterfaceProblemWithRIFTExact(
     stats->num_solution_messages = riftStats.directed_messages_sent;
     stats->bytes_sent_upward = riftStats.actual_message_bytes;
     stats->bytes_sent_downward = 0;
+    stats->async_dd_iterations = riftStats.async_schur_iterations;
+    stats->async_dd_converged = riftStats.async_schur_converged;
+    stats->async_dd_initial_residual =
+        riftStats.async_schur_initial_residual;
+    stats->async_dd_final_residual = riftStats.async_schur_final_residual;
     stats->rift_selected_backend = riftStats.selected_backend;
     stats->rift_num_cliques = riftStats.num_cliques;
     stats->rift_num_tree_edges = riftStats.num_tree_edges;

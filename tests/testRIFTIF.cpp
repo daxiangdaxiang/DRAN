@@ -228,6 +228,43 @@ std::vector<InterfaceFactor> makeIncrementalRiftFactors(bool includeLoopFactor) 
   return factors;
 }
 
+std::vector<InterfaceFactor> makeAsyncSchurFactors(bool includeThirdRobot) {
+  const PoseKey a{0, 0};
+  const PoseKey b{1, 1};
+  const PoseKey c{2, 2};
+  std::vector<InterfaceFactor> factors = {
+      makeScalarInterfaceFactor(0, {a}, 1, 0.0, 0),
+      makeScalarInterfaceFactor(1, {b}, 1, 0.0, 1),
+      makeScalarInterfaceFactor(2, {a, b}, 1, 0.0, 0)};
+  factors[0].A.resize(1, 1);
+  factors[0].A << 2.0;
+  factors[0].B.resize(1, 1);
+  factors[0].B << 2.0;
+  factors[1].A.resize(1, 1);
+  factors[1].A << 2.0;
+  factors[1].B.resize(1, 1);
+  factors[1].B << 4.0;
+  factors[2].A.resize(1, 2);
+  factors[2].A << 0.25, -0.25;
+  factors[2].B.resize(1, 1);
+  factors[2].B << -0.25;
+  if (includeThirdRobot) {
+    InterfaceFactor f3 = makeScalarInterfaceFactor(3, {c}, 1, 0.0, 2);
+    f3.A.resize(1, 1);
+    f3.A << 2.0;
+    f3.B.resize(1, 1);
+    f3.B << 6.0;
+    InterfaceFactor f4 = makeScalarInterfaceFactor(4, {b, c}, 1, 0.0, 1);
+    f4.A.resize(1, 2);
+    f4.A << 0.20, -0.20;
+    f4.B.resize(1, 1);
+    f4.B << 0.80;
+    factors.push_back(f3);
+    factors.push_back(f4);
+  }
+  return factors;
+}
+
 Matrix explicitNormalMatrixForTest(const InterfaceProblem &problem) {
   const int cols =
       static_cast<int>(problem.variables.size()) * problem.block_dim;
@@ -768,6 +805,122 @@ TEST(testDPGO, RIFTIFCAKBackendRunsThroughTEDRoute) {
   EXPECT_FALSE(stats.rift_used_collective);
 }
 
+TEST(testDPGO, RIFTIFAsyncSchurResidualDecreasesAndMatchesDirectSmallSPD) {
+  const InterfaceProblem problem =
+      InterfaceProblemBuilder::BuildFromInterfaceFactors(
+          FactorType::TRANSLATION, 2, 1, 1,
+          makeAsyncSchurFactors(/*includeThirdRobot=*/false));
+  const Matrix H = explicitNormalMatrixForTest(problem);
+  const Matrix rhs = explicitNormalRhsForTest(problem);
+  const Matrix direct = H.colPivHouseholderQr().solve(rhs);
+
+  RIFTParams params;
+  params.async_schur_max_iters = 1000;
+  params.async_schur_rel_tol = 1e-10;
+  params.async_schur_relaxation = 0.5;
+  RIFTStats stats;
+  DecentralizationGuard guard;
+  const Matrix async =
+      RIFTAsyncSchurSolver::SolveMatrix(problem, params, &stats, &guard);
+
+  EXPECT_EQ(stats.selected_backend, RIFTInterfaceBackend::RIFT_ASYNC_SCHUR);
+  EXPECT_TRUE(stats.async_schur_converged);
+  EXPECT_TRUE(stats.async_schur_global_consistent);
+  EXPECT_GT(stats.async_schur_iterations, 0);
+  EXPECT_LT(stats.async_schur_final_residual,
+            stats.async_schur_initial_residual);
+  EXPECT_LT((async - direct).norm(), 1e-7);
+  EXPECT_FALSE(stats.used_direct_solver);
+  EXPECT_FALSE(stats.used_global_matrix);
+  EXPECT_FALSE(stats.used_collective);
+}
+
+TEST(testDPGO, RIFTIFAsyncSchurDelayedReorderedDeliveryConverges) {
+  const InterfaceProblem problem =
+      InterfaceProblemBuilder::BuildFromInterfaceFactors(
+          FactorType::TRANSLATION, 2, 1, 1,
+          makeAsyncSchurFactors(/*includeThirdRobot=*/true));
+  const Matrix H = explicitNormalMatrixForTest(problem);
+  const Matrix rhs = explicitNormalRhsForTest(problem);
+  const Matrix direct = H.colPivHouseholderQr().solve(rhs);
+
+  RIFTParams params;
+  params.async_schur_max_iters = 5000;
+  params.async_schur_rel_tol = 1e-9;
+  params.async_schur_relaxation = 0.25;
+  RIFTAsyncSchurSolver solver(problem, params, 7);
+  RIFTLinkModel delayed;
+  delayed.latency_mean_ms = 2.0;
+  delayed.latency_jitter_ms = 1.0;
+  delayed.reorder_prob = 1.0;
+  solver.SetLinkModel(0, 1, delayed);
+  solver.SetLinkModel(1, 2, delayed);
+  solver.SetLinkModel(0, 2, delayed);
+  solver.Run(params.async_schur_max_iters);
+
+  EXPECT_TRUE(solver.GlobalConverged())
+      << "residual=" << solver.GlobalResidualNorm()
+      << " diff=" << (solver.Solution() - direct).norm();
+  EXPECT_LT((solver.Solution() - direct).norm(), 1e-7);
+}
+
+TEST(testDPGO, RIFTIFAsyncSchurPermanentSplitReportsComponentWiseOnly) {
+  const InterfaceProblem problem =
+      InterfaceProblemBuilder::BuildFromInterfaceFactors(
+          FactorType::TRANSLATION, 2, 1, 1,
+          makeAsyncSchurFactors(/*includeThirdRobot=*/true));
+  RIFTParams params;
+  params.async_schur_max_iters = 800;
+  params.async_schur_rel_tol = 1e-10;
+  params.async_schur_relaxation = 0.5;
+  RIFTAsyncSchurSolver solver(problem, params, 11);
+  solver.DropLink(0, 2);
+  solver.DropLink(1, 2);
+  solver.Run(params.async_schur_max_iters);
+
+  const auto components = solver.ConnectedComponents();
+  ASSERT_EQ(components.size(), 2u);
+  EXPECT_TRUE(solver.ComponentConsistent());
+  EXPECT_TRUE(solver.ComponentConverged({0, 1}));
+  EXPECT_TRUE(solver.ComponentConverged({2}));
+  EXPECT_FALSE(solver.GlobalConverged());
+  EXPECT_GT(solver.GlobalResidualNorm(), 1e-6);
+}
+
+TEST(testDPGO, RIFTIFAsyncSchurReconnectWarmStartMergesComponents) {
+  const InterfaceProblem problem =
+      InterfaceProblemBuilder::BuildFromInterfaceFactors(
+          FactorType::TRANSLATION, 2, 1, 1,
+          makeAsyncSchurFactors(/*includeThirdRobot=*/true));
+  const Matrix H = explicitNormalMatrixForTest(problem);
+  const Matrix rhs = explicitNormalRhsForTest(problem);
+  const Matrix direct = H.colPivHouseholderQr().solve(rhs);
+
+  RIFTParams params;
+  params.async_schur_max_iters = 5000;
+  params.async_schur_rel_tol = 1e-9;
+  params.async_schur_relaxation = 0.25;
+  RIFTAsyncSchurSolver solver(problem, params, 13);
+  solver.DropLink(0, 2);
+  solver.DropLink(1, 2);
+  solver.Run(50);
+  const Matrix splitSolution = solver.Solution();
+  const double splitResidual = solver.GlobalResidualNorm();
+  ASSERT_FALSE(solver.GlobalConverged());
+
+  solver.RestoreLink(1, 2);
+  solver.RestoreLink(0, 2);
+  solver.Run(params.async_schur_max_iters);
+
+  EXPECT_GE(solver.reconnect_merges(), 1);
+  EXPECT_GT(splitSolution.norm(), 0.0);
+  EXPECT_LT(solver.GlobalResidualNorm(), splitResidual);
+  EXPECT_TRUE(solver.GlobalConverged())
+      << "residual=" << solver.GlobalResidualNorm()
+      << " diff=" << (solver.Solution() - direct).norm();
+  EXPECT_LT((solver.Solution() - direct).norm(), 1e-7);
+}
+
 TEST(testDPGO, RIFTIFNetworkZeroDelayMatchesRootlessSchedulerOrdering) {
   InterfaceCliqueTree tree;
   tree.cliques.resize(3);
@@ -1061,23 +1214,37 @@ TEST(testDPGO, RIFTIFDirectBackendRejectedInDeploymentPath) {
                std::invalid_argument);
 }
 
-TEST(testDPGO, RIFTIFRejectsUnimplementedAsyncSchurFallbackBackend) {
-  const int blockDim = 4;
-  const PoseKey a{0, 1};
-  CondensedFactor factor;
-  factor.owner_robot_id = 0;
-  factor.factor_type = FactorType::ROTATION;
-  factor.boundary_keys = {a};
-  factor.Abar = Matrix::Identity(blockDim, blockDim);
-  factor.bbar = Vector::Ones(blockDim);
+TEST(testDPGO, RIFTIFAsyncSchurBackendRunsThroughTEDRoute) {
+  const InterfaceProblem problem =
+      InterfaceProblemBuilder::BuildFromInterfaceFactors(
+          FactorType::TRANSLATION, 2, 1, 1,
+          makeAsyncSchurFactors(/*includeThirdRobot=*/false));
+  const Matrix H = explicitNormalMatrixForTest(problem);
+  const Matrix rhs = explicitNormalRhsForTest(problem);
+  const Matrix direct = H.colPivHouseholderQr().solve(rhs);
 
   TEDCCIParams params;
   params.mode = CCIInitMode::TED_CCI_RIFT_IF;
   params.rift_interface_backend = RIFTInterfaceBackend::RIFT_ASYNC_SCHUR;
+  params.rift_forbid_direct_interface_solver = true;
+  params.rift_forbid_global_interface_matrix = true;
+  params.rift_forbid_collectives = true;
+  params.async_dd_max_iters = 1000;
+  params.async_dd_rel_tol = 1e-10;
   TEDCCIStats stats;
-  EXPECT_THROW(SolveTEDInterfaceWithRIFTExact({factor}, {}, blockDim, {},
-                                             params, &stats),
-               std::invalid_argument);
+  const Matrix async = SolveInterfaceProblemWithRIFTExact(problem, params,
+                                                         &stats);
+
+  EXPECT_LT((async - direct).norm(), 1e-7);
+  EXPECT_EQ(stats.rift_selected_backend,
+            RIFTInterfaceBackend::RIFT_ASYNC_SCHUR);
+  EXPECT_TRUE(stats.async_dd_converged);
+  EXPECT_GT(stats.async_dd_iterations, 0);
+  EXPECT_LT(stats.async_dd_final_residual,
+            stats.async_dd_initial_residual);
+  EXPECT_FALSE(stats.rift_used_direct_solver);
+  EXPECT_FALSE(stats.rift_used_global_matrix);
+  EXPECT_FALSE(stats.rift_used_collective);
 }
 
 TEST(testDPGO, TEDCCIRIFTIFMatchesCentralized2DChainSplit) {

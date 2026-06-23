@@ -11,6 +11,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -29,6 +30,10 @@ struct RIFTParams {
   bool forbid_global_interface_matrix = true;
   bool forbid_direct_solver_in_deployment = true;
   bool forbid_collectives = true;
+  int async_schur_max_iters = 5000;
+  double async_schur_rel_tol = 1e-8;
+  double async_schur_relaxation = 0.25;
+  double async_schur_damping = 1e-6;
 };
 
 struct RIFTStats {
@@ -51,6 +56,15 @@ struct RIFTStats {
   int cak_scalar_reductions = 0;
   std::size_t cak_scalar_reduction_bytes = 0;
   double cak_final_residual = -1.0;
+  int async_schur_iterations = 0;
+  double async_schur_initial_residual = -1.0;
+  double async_schur_final_residual = -1.0;
+  bool async_schur_converged = false;
+  bool async_schur_global_consistent = true;
+  bool async_schur_component_consistent = false;
+  int async_schur_components = 1;
+  int async_schur_stale_messages_rejected = 0;
+  int async_schur_reconnect_merges = 0;
   double symbolic_ms = 0.0;
   double message_qr_ms = 0.0;
   double belief_solve_ms = 0.0;
@@ -344,6 +358,66 @@ class RIFTCAKSolver {
   static Vector Solve(const InterfaceProblem &problem,
                       const RIFTParams &params, RIFTStats *stats = nullptr,
                       DecentralizationGuard *guard = nullptr);
+};
+
+class RIFTAsyncSchurSolver {
+ public:
+  RIFTAsyncSchurSolver(const InterfaceProblem &problem,
+                       const RIFTParams &params,
+                       std::uint64_t seed = 1);
+
+  void SetLinkModel(int a, int b, const RIFTLinkModel &model);
+  void DropLink(int a, int b);
+  void RestoreLink(int a, int b);
+  void StepRobot(int robot_id);
+  void Run(int max_iterations);
+
+  bool ComponentConverged(const std::vector<int> &component) const;
+  bool GlobalConverged() const;
+  bool ComponentConsistent() const;
+  Matrix Solution() const;
+  double GlobalResidualNorm() const;
+  double ComponentResidualNorm(const std::vector<int> &component) const;
+  std::vector<std::vector<int>> ConnectedComponents() const;
+
+  int iterations() const { return iterations_; }
+  int stale_messages_rejected() const { return stale_messages_rejected_; }
+  int reconnect_merges() const { return reconnect_merges_; }
+
+  static Matrix SolveMatrix(const InterfaceProblem &problem,
+                            const RIFTParams &params,
+                            RIFTStats *stats = nullptr,
+                            DecentralizationGuard *guard = nullptr);
+  static Vector Solve(const InterfaceProblem &problem,
+                      const RIFTParams &params, RIFTStats *stats = nullptr,
+                      DecentralizationGuard *guard = nullptr);
+
+ private:
+  void DeliverReadyMessages();
+  void BroadcastState(int robot_id);
+  void BroadcastFactorGradients(int robot_id,
+                                const std::vector<int> &component);
+  std::vector<int> ReachableComponent(int robot_id) const;
+
+  InterfaceProblem problem_;
+  RIFTParams params_;
+  std::vector<int> robots_;
+  std::map<int, std::vector<int>> owned_key_indices_;
+  Matrix values_;
+  std::map<int, std::vector<Matrix>> value_cache_by_robot_;
+  std::map<std::pair<int, int>, Matrix> gradient_cache_;
+  std::map<std::pair<int, int>, Matrix> diagonal_cache_;
+  std::map<std::tuple<int, int, int, int>, std::uint64_t> last_message_seq_;
+  RIFTP2PNetworkSimulator network_;
+  DecentralizationGuard *guard_ = nullptr;
+  std::uint64_t next_seq_ = 1;
+  double current_time_ms_ = 0.0;
+  double initial_residual_ = 0.0;
+  int iterations_ = 0;
+  int stale_messages_rejected_ = 0;
+  int reconnect_merges_ = 0;
+  std::size_t message_bytes_ = 0;
+  int message_count_ = 0;
 };
 
 Matrix SolveInterfaceProblemWithRIFTExact(

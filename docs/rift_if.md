@@ -56,8 +56,19 @@ Current implementation status:
   a tree scalar reducer rather than an MPI collective.  This MVP is intended
   for high-treewidth fallback validation on small well-conditioned interface
   systems; s-step/pipelined CAK and stronger preconditioning are later phases.
-- Async-Schur, component fallback, and reconnect merge are planned follow-up
-  backends.
+- `--interface-backend rift_async_schur` selects the first asynchronous
+  Schur/RAS fallback slice.  Factor-owner robots repeatedly send
+  factor-local gradient and block-diagonal curvature contributions computed
+  from cached interface states.  Variable-owner robots apply damped relaxed
+  block updates, reject stale messages by sequence number, and retransmit
+  current interface states.  When links are down, each live communication
+  component only uses factors fully contained in that component and therefore
+  reports component-wise consistency rather than global consistency.  Reconnect
+  keeps the current interface state and resumes on the merged component as a
+  warm start.
+- Component fallback and reconnect merge are covered by the async Schur MVP
+  tests.  Stronger asynchronous Schur preconditioning and production network
+  integration remain follow-up work.
 
 The RIFT exact path must not call `InterfaceDirectSolver::Solve`, must not call
 `stackInterfaceSystem*`, and must not use MPI collectives.  Small 2D/3D tests

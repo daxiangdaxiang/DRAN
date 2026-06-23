@@ -3386,8 +3386,13 @@ Matrix TEDCCISolver::InitializeSingleProcessDirect(
     stats->async_dd_iterations =
         rotationInterfaceStats.async_dd_iterations +
         translationInterfaceStats.async_dd_iterations;
+    const bool reportsAsyncConvergence =
+        params.mode == CCIInitMode::TED_CCI_ASYNC_DD ||
+        (params.mode == CCIInitMode::TED_CCI_RIFT_IF &&
+         params.rift_interface_backend ==
+             RIFTInterfaceBackend::RIFT_ASYNC_SCHUR);
     stats->async_dd_converged =
-        params.mode == CCIInitMode::TED_CCI_ASYNC_DD &&
+        reportsAsyncConvergence &&
         rotationInterfaceStats.async_dd_converged &&
         translationInterfaceStats.async_dd_converged;
     stats->async_dd_initial_residual = std::hypot(
