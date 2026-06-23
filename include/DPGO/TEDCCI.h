@@ -83,7 +83,7 @@ struct TEDCCIParams {
   bool async_dd_enable_coarse_correction = false;
   RIFTInterfaceBackend rift_interface_backend =
       RIFTInterfaceBackend::DIRECT_ORACLE;
-  bool rift_use_rotation_multi_rhs = false;
+  bool rift_use_rotation_multi_rhs = true;
   int rift_exact_max_separator_blocks_2d = 256;
   int rift_exact_max_separator_blocks_3d = 128;
   std::size_t rift_exact_max_message_bytes = 32ull * 1024ull * 1024ull;

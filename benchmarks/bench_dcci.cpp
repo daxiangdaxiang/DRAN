@@ -222,7 +222,7 @@ struct Options {
   unsigned dcciProcessFrameStride = 0;
   unsigned dcciProcessMaxFrames = 16;
   RIFTInterfaceBackend interfaceBackend = RIFTInterfaceBackend::DIRECT_ORACLE;
-  bool useRotationMultiRhs = false;
+  bool useRotationMultiRhs = true;
   bool forbidDirectInterfaceSolver = false;
   bool forbidGlobalInterfaceMatrix = false;
   bool forbidCollectives = false;

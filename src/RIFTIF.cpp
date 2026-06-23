@@ -236,7 +236,12 @@ std::size_t messageBytes(const RIFTMessage &message) {
 }
 
 double interfaceResidualNorm(const InterfaceProblem &problem,
-                             const Vector &solution) {
+                             const Matrix &solution) {
+  if (solution.rows() !=
+          static_cast<int>(problem.variables.size()) * problem.block_dim ||
+      solution.cols() != problem.rhs_dim) {
+    throw std::invalid_argument("RIFT-IF solution matrix dimension mismatch");
+  }
   double squared = 0.0;
   for (const auto &factor : problem.factors) {
     Matrix X(factor.A.cols(), problem.rhs_dim);
@@ -245,7 +250,7 @@ double interfaceResidualNorm(const InterfaceProblem &problem,
           keyOffset(problem.variables, factor.scope[k], problem.block_dim);
       const int localOffset = static_cast<int>(k) * problem.block_dim;
       X.block(localOffset, 0, problem.block_dim, problem.rhs_dim) =
-          solution.segment(globalOffset, problem.block_dim);
+          solution.block(globalOffset, 0, problem.block_dim, problem.rhs_dim);
     }
     const Matrix residual = factor.A * X - factor.B;
     squared += residual.squaredNorm();
@@ -317,6 +322,40 @@ void DecentralizationGuard::AssertNoNodeReceivedAllFactors(
   }
 }
 
+InterfaceProblem InterfaceProblemBuilder::BuildFromInterfaceFactors(
+    FactorType stage, int dimension, int block_dim, int rhs_dim,
+    const std::vector<InterfaceFactor> &factors) {
+  if (dimension <= 0 || block_dim <= 0 || rhs_dim <= 0) {
+    throw std::invalid_argument("RIFT-IF problem dimensions must be positive");
+  }
+  InterfaceProblem problem;
+  problem.stage = stage;
+  problem.dimension = dimension;
+  problem.block_dim = block_dim;
+  problem.rhs_dim = rhs_dim;
+  std::vector<InterfaceKey> variables;
+  for (const auto &factor : factors) {
+    if (factor.stage != stage) {
+      throw std::invalid_argument("RIFT-IF factor stage mismatch");
+    }
+    if (factor.A.rows() != factor.B.rows()) {
+      throw std::invalid_argument("RIFT-IF factor A/B row mismatch");
+    }
+    if (factor.B.cols() != rhs_dim) {
+      throw std::invalid_argument("RIFT-IF factor RHS dimension mismatch");
+    }
+    if (factor.A.cols() !=
+        static_cast<int>(factor.scope.size()) * block_dim) {
+      throw std::invalid_argument("RIFT-IF factor column mismatch");
+    }
+    variables.insert(variables.end(), factor.scope.begin(),
+                     factor.scope.end());
+    problem.factors.push_back(factor);
+  }
+  problem.variables = sortedUnique(std::move(variables));
+  return problem;
+}
+
 InterfaceProblem InterfaceProblemBuilder::BuildFromTEDFactors(
     FactorType stage, int dimension, int block_dim,
     const std::vector<CondensedFactor> &condensed_factors,
@@ -333,7 +372,7 @@ InterfaceProblem InterfaceProblemBuilder::BuildFromTEDFactors(
   problem.rhs_dim = 1;
   if (stage == FactorType::ROTATION && use_rotation_multi_rhs) {
     throw std::invalid_argument(
-        "RIFT-IF rotation multi-RHS is not implemented in this backend yet");
+        "RIFT-IF rotation multi-RHS must be built from row-wise factors");
   }
 
   RIFTFactorId nextId = 0;
@@ -370,6 +409,156 @@ InterfaceProblem InterfaceProblemBuilder::BuildFromTEDFactors(
   }
   problem.variables = sortedUnique(std::move(variables));
   return problem;
+}
+
+InterfaceFactor BuildRotationMultiRHSFactorFromVectorized(
+    RIFTFactorId id, const std::vector<PoseKey> &scope,
+    const Matrix &vectorized_A, const Vector &vectorized_b, int dimension,
+    int owner_robot, std::uint64_t graph_epoch) {
+  if (dimension <= 0) {
+    throw std::invalid_argument("RIFT-IF multi-RHS dimension must be positive");
+  }
+  if (vectorized_A.rows() != vectorized_b.rows()) {
+    throw std::invalid_argument("RIFT-IF vectorized factor A/b row mismatch");
+  }
+  if (vectorized_A.rows() % dimension != 0) {
+    throw std::invalid_argument(
+        "RIFT-IF vectorized rotation rows are not divisible by dimension");
+  }
+  if (vectorized_A.cols() !=
+      static_cast<int>(scope.size()) * dimension * dimension) {
+    throw std::invalid_argument(
+        "RIFT-IF vectorized rotation factor column mismatch");
+  }
+
+  const int rows = vectorized_A.rows() / dimension;
+  InterfaceFactor factor;
+  factor.id = id;
+  factor.stage = FactorType::ROTATION;
+  factor.scope = scope;
+  factor.A =
+      Matrix::Zero(rows, static_cast<int>(scope.size()) * dimension);
+  factor.B = Matrix::Zero(rows, dimension);
+  factor.owner_robot = owner_robot;
+  factor.graph_epoch = graph_epoch;
+
+  constexpr double kCoeffTol = 1e-8;
+  for (int rhs = 0; rhs < dimension; ++rhs) {
+    for (int row = 0; row < rows; ++row) {
+      const int vecRow = rhs + row * dimension;
+      factor.B(row, rhs) = vectorized_b(vecRow);
+      for (std::size_t keyIndex = 0; keyIndex < scope.size(); ++keyIndex) {
+        for (int col = 0; col < dimension; ++col) {
+          const int multiCol =
+              static_cast<int>(keyIndex) * dimension + col;
+          const int vecCol = static_cast<int>(keyIndex) * dimension *
+                                 dimension +
+                             rhs + col * dimension;
+          const double coeff = vectorized_A(vecRow, vecCol);
+          for (int otherRhs = 0; otherRhs < dimension; ++otherRhs) {
+            if (otherRhs == rhs) {
+              continue;
+            }
+            const int offRhsVecCol = static_cast<int>(keyIndex) * dimension *
+                                         dimension +
+                                     otherRhs + col * dimension;
+            const double offCoeff = vectorized_A(vecRow, offRhsVecCol);
+            if (std::abs(offCoeff) > kCoeffTol) {
+              throw std::invalid_argument(
+                  "RIFT-IF vectorized rotation factor has off-row coupling");
+            }
+          }
+          if (rhs == 0) {
+            factor.A(row, multiCol) = coeff;
+          } else if (std::abs(factor.A(row, multiCol) - coeff) >
+                     kCoeffTol *
+                         std::max(1.0, std::abs(factor.A(row, multiCol)))) {
+            throw std::invalid_argument(
+                "RIFT-IF vectorized rotation factor is not row-separable");
+          }
+        }
+      }
+    }
+  }
+  return factor;
+}
+
+InterfaceFactor CondenseMultiRHSFactors(
+    RIFTFactorId id, FactorType stage, int dimension,
+    const std::vector<InterfaceFactor> &factors,
+    const std::vector<PoseKey> &interior_keys,
+    const std::vector<PoseKey> &boundary_keys, int owner_robot,
+    std::uint64_t graph_epoch) {
+  if (dimension <= 0) {
+    throw std::invalid_argument("RIFT-IF multi-RHS dimension must be positive");
+  }
+  const std::vector<InterfaceKey> interior = sortedUnique(interior_keys);
+  const std::vector<InterfaceKey> boundary = sortedUnique(boundary_keys);
+  std::vector<InterfaceKey> orderedKeys = interior;
+  orderedKeys.insert(orderedKeys.end(), boundary.begin(), boundary.end());
+
+  std::vector<const InterfaceFactor *> factorPtrs;
+  factorPtrs.reserve(factors.size());
+  for (const auto &factor : factors) {
+    if (factor.stage != stage) {
+      throw std::invalid_argument("RIFT-IF multi-RHS factor stage mismatch");
+    }
+    if (factor.B.cols() != dimension) {
+      throw std::invalid_argument("RIFT-IF multi-RHS RHS dimension mismatch");
+    }
+    factorPtrs.push_back(&factor);
+  }
+  const auto stacked =
+      stackFactorsForClique(orderedKeys, dimension, dimension, factorPtrs, {});
+  const Matrix &A = stacked.first;
+  const Matrix &B = stacked.second;
+  const int interiorDim = static_cast<int>(interior.size()) * dimension;
+  const int boundaryDim = static_cast<int>(boundary.size()) * dimension;
+
+  InterfaceFactor condensed;
+  condensed.id = id;
+  condensed.stage = stage;
+  condensed.scope = boundary;
+  condensed.owner_robot = owner_robot;
+  condensed.graph_epoch = graph_epoch;
+
+  if (interiorDim == 0) {
+    if (boundaryDim == 0) {
+      condensed.A = Matrix::Zero(A.rows(), 0);
+    } else {
+      condensed.A = A.rightCols(boundaryDim);
+    }
+    condensed.B = B;
+    return condensed;
+  }
+  if (A.rows() < interiorDim) {
+    throw std::invalid_argument(
+        "RIFT-IF multi-RHS condensation has underdetermined interior block");
+  }
+
+  const Matrix AI = A.leftCols(interiorDim);
+  Matrix rest(A.rows(), boundaryDim + dimension);
+  if (boundaryDim > 0) {
+    rest.leftCols(boundaryDim) = A.middleCols(interiorDim, boundaryDim);
+  }
+  rest.rightCols(dimension) = B;
+
+  Eigen::ColPivHouseholderQR<Matrix> qr(AI);
+  if (static_cast<int>(qr.rank()) < interiorDim) {
+    throw std::invalid_argument(
+        "RIFT-IF multi-RHS condensation requires full-rank interior block");
+  }
+  const Matrix transformed = qr.householderQ().transpose() * rest;
+  const int residualRows = A.rows() - interiorDim;
+  if (boundaryDim == 0) {
+    condensed.A = Matrix::Zero(residualRows, 0);
+  } else {
+    condensed.A =
+        transformed.block(interiorDim, 0, residualRows, boundaryDim);
+  }
+  condensed.B =
+      transformed.block(interiorDim, boundaryDim, residualRows, dimension);
+  return condensed;
 }
 
 InterfaceCliqueTree InterfaceCliqueTreeBuilder::Build(
@@ -681,10 +870,11 @@ bool RIFTRootlessScheduler::CliqueBeliefReady(RIFTCliqueId alpha) const {
   return true;
 }
 
-Vector RIFTExactSolver::Solve(const InterfaceProblem &problem,
-                              const InterfaceCliqueTree &tree,
-                              const RIFTParams &params, RIFTStats *stats,
-                              DecentralizationGuard *guard) {
+Matrix RIFTExactSolver::SolveMatrix(const InterfaceProblem &problem,
+                                    const InterfaceCliqueTree &tree,
+                                    const RIFTParams &params,
+                                    RIFTStats *stats,
+                                    DecentralizationGuard *guard) {
   if (problem.block_dim <= 0 || problem.rhs_dim <= 0) {
     throw std::invalid_argument("RIFT-IF problem dimensions must be positive");
   }
@@ -757,7 +947,7 @@ Vector RIFTExactSolver::Solve(const InterfaceProblem &problem,
     }
   });
 
-  std::map<InterfaceKey, Vector> blockByKey;
+  std::map<InterfaceKey, Matrix> blockByKey;
   localStats.belief_solve_ms += elapsedMilliseconds([&]() {
     for (const auto &clique : tree.cliques) {
       std::vector<const InterfaceFactor *> factors;
@@ -786,23 +976,22 @@ Vector RIFTExactSolver::Solve(const InterfaceProblem &problem,
         if (blockByKey.count(key) != 0) {
           continue;
         }
-        blockByKey[key] =
-            X.block(static_cast<int>(i) * problem.block_dim, 0,
-                    problem.block_dim, 1);
+        blockByKey[key] = X.block(static_cast<int>(i) * problem.block_dim, 0,
+                                  problem.block_dim, problem.rhs_dim);
       }
     }
   });
 
-  Vector solution =
-      Vector::Zero(static_cast<int>(problem.variables.size()) *
-                   problem.block_dim);
+  Matrix solution = Matrix::Zero(
+      static_cast<int>(problem.variables.size()) * problem.block_dim,
+      problem.rhs_dim);
   for (std::size_t i = 0; i < problem.variables.size(); ++i) {
     const auto block = blockByKey.find(problem.variables[i]);
     if (block == blockByKey.end()) {
       throw std::runtime_error("RIFT-IF failed to extract interface variable");
     }
-    solution.segment(static_cast<int>(i) * problem.block_dim,
-                     problem.block_dim) = block->second;
+    solution.block(static_cast<int>(i) * problem.block_dim, 0,
+                   problem.block_dim, problem.rhs_dim) = block->second;
   }
 
   localStats.final_interface_residual =
@@ -833,25 +1022,20 @@ Vector RIFTExactSolver::Solve(const InterfaceProblem &problem,
   return solution;
 }
 
-Vector SolveTEDInterfaceWithRIFTExact(
-    const std::vector<CondensedFactor> &condensed_factors,
-    const std::vector<LinearFactorBlock> &cross_factors, int block_dim,
-    const std::vector<TEDCCIPartition> &partitions,
-    const TEDCCIParams &params, TEDCCIStats *stats) {
-  if (block_dim <= 0) {
-    throw std::invalid_argument("RIFT-IF TED interface block dimension invalid");
+Vector RIFTExactSolver::Solve(const InterfaceProblem &problem,
+                              const InterfaceCliqueTree &tree,
+                              const RIFTParams &params, RIFTStats *stats,
+                              DecentralizationGuard *guard) {
+  if (problem.rhs_dim != 1) {
+    throw std::invalid_argument(
+        "RIFT-IF vector Solve requires a single RHS; use SolveMatrix");
   }
-  (void)partitions;
-  const FactorType stage =
-      !condensed_factors.empty()
-          ? condensed_factors.front().factor_type
-          : (!cross_factors.empty() ? FactorType::ROTATION
-                                    : FactorType::TRANSLATION);
-  const int dimension =
-      stage == FactorType::ROTATION
-          ? static_cast<int>(std::round(std::sqrt(static_cast<double>(block_dim))))
-          : block_dim;
+  return SolveMatrix(problem, tree, params, stats, guard).col(0);
+}
 
+Matrix SolveInterfaceProblemWithRIFTExact(
+    const InterfaceProblem &problem, const TEDCCIParams &params,
+    TEDCCIStats *stats) {
   RIFTParams riftParams;
   riftParams.backend = params.rift_interface_backend;
   if (riftParams.backend == RIFTInterfaceBackend::DIRECT_ORACLE) {
@@ -876,17 +1060,14 @@ Vector SolveTEDInterfaceWithRIFTExact(
   riftParams.forbid_collectives = params.rift_forbid_collectives;
 
   RIFTStats riftStats;
-  InterfaceProblem problem;
   InterfaceCliqueTree tree;
   double symbolicMs = elapsedMilliseconds([&]() {
-    problem = InterfaceProblemBuilder::BuildFromTEDFactors(
-        stage, dimension, block_dim, condensed_factors, cross_factors,
-        params.rift_use_rotation_multi_rhs);
     tree = InterfaceCliqueTreeBuilder::Build(problem, riftParams);
   });
   DecentralizationGuard guard;
-  Vector solution =
-      RIFTExactSolver::Solve(problem, tree, riftParams, &riftStats, &guard);
+  Matrix solution =
+      RIFTExactSolver::SolveMatrix(problem, tree, riftParams, &riftStats,
+                                   &guard);
   riftStats.symbolic_ms += symbolicMs;
 
   if (stats != nullptr) {
@@ -894,8 +1075,8 @@ Vector SolveTEDInterfaceWithRIFTExact(
     stats->effective_interface_backend = params.interface_backend;
     stats->num_interface_vars = static_cast<int>(problem.variables.size());
     stats->num_condensed_rows = 0;
-    for (const auto &factor : condensed_factors) {
-      stats->num_condensed_rows += factor.Abar.rows();
+    for (const auto &factor : problem.factors) {
+      stats->num_condensed_rows += factor.A.rows();
     }
     stats->max_separator_size = riftStats.max_separator_blocks;
     stats->num_factor_messages = static_cast<int>(problem.factors.size());
@@ -920,6 +1101,37 @@ Vector SolveTEDInterfaceWithRIFTExact(
     stats->rift_used_collective = riftStats.used_collective;
   }
   return solution;
+}
+
+Vector SolveTEDInterfaceWithRIFTExact(
+    const std::vector<CondensedFactor> &condensed_factors,
+    const std::vector<LinearFactorBlock> &cross_factors, int block_dim,
+    const std::vector<TEDCCIPartition> &partitions,
+    const TEDCCIParams &params, TEDCCIStats *stats) {
+  if (block_dim <= 0) {
+    throw std::invalid_argument("RIFT-IF TED interface block dimension invalid");
+  }
+  (void)partitions;
+  const FactorType stage =
+      !condensed_factors.empty()
+          ? condensed_factors.front().factor_type
+          : (!cross_factors.empty() ? FactorType::ROTATION
+                                    : FactorType::TRANSLATION);
+  const int dimension =
+      stage == FactorType::ROTATION
+          ? static_cast<int>(std::round(std::sqrt(static_cast<double>(block_dim))))
+          : block_dim;
+  const InterfaceProblem problem =
+      InterfaceProblemBuilder::BuildFromTEDFactors(
+          stage, dimension, block_dim, condensed_factors, cross_factors,
+          /*use_rotation_multi_rhs=*/false);
+  const Matrix solution =
+      SolveInterfaceProblemWithRIFTExact(problem, params, stats);
+  if (solution.cols() != 1) {
+    throw std::invalid_argument(
+        "RIFT-IF TED vector interface solve produced multiple RHS columns");
+  }
+  return solution.col(0);
 }
 
 std::string RIFTInterfaceBackendName(RIFTInterfaceBackend backend) {

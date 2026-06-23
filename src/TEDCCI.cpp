@@ -602,6 +602,25 @@ Matrix matrixFromVector(const Vector &x, int d) {
   return Eigen::Map<const Matrix>(x.data(), d, d);
 }
 
+Vector vectorizeRotationMultiRhsSolution(const std::vector<PoseKey> &keys,
+                                         const Matrix &multiRhsSolution,
+                                         int d) {
+  if (multiRhsSolution.rows() != static_cast<int>(keys.size()) * d ||
+      multiRhsSolution.cols() != d) {
+    throw std::invalid_argument(
+        "TED-CCI RIFT multi-RHS rotation solution has wrong size");
+  }
+  Vector vectorized(static_cast<int>(keys.size()) * d * d);
+  for (std::size_t i = 0; i < keys.size(); ++i) {
+    const Matrix rowWiseBlock =
+        multiRhsSolution.block(static_cast<int>(i) * d, 0, d, d);
+    const Matrix rotationBlock = rowWiseBlock.transpose();
+    vectorized.segment(static_cast<int>(i) * d * d, d * d) =
+        vectorizeMatrix(rotationBlock);
+  }
+  return vectorized;
+}
+
 std::map<PoseKey, Matrix> projectedRotationBlocks(
     int d, const std::map<PoseKey, Vector> &relaxedBlocks,
     const TEDCCIParams &params) {
@@ -3183,10 +3202,17 @@ Matrix TEDCCISolver::InitializeSingleProcessDirect(
 
   const int d = dimension;
   const int rotationBlockDim = d * d;
+  const bool useRiftRotationMultiRhs =
+      params.mode == CCIInitMode::TED_CCI_RIFT_IF &&
+      params.rift_use_rotation_multi_rhs;
   std::vector<CondensedFactor> rotationCondensed;
   std::vector<BackSubstitutionCache> rotationCaches;
+  std::vector<InterfaceFactor> rotationMultiRhsInterfaceFactors;
+  RIFTFactorId rotationMultiRhsNextId = 0;
   rotationCondensed.reserve(partitions.size());
   rotationCaches.reserve(partitions.size());
+  rotationMultiRhsInterfaceFactors.reserve(partitions.size() +
+                                           shared.size());
   double localQrMs = 0.0;
   double interfaceSolveMs = 0.0;
 
@@ -3195,6 +3221,23 @@ Matrix TEDCCISolver::InitializeSingleProcessDirect(
         robotLocalMeasurements(partition.local_robot_id, normalized);
     const auto factors = CCIFactorBuilder::BuildRotationFactors(
         d, localMeasurements, params);
+    if (useRiftRotationMultiRhs) {
+      localQrMs += elapsedMilliseconds([&]() {
+        std::vector<InterfaceFactor> multiRhsFactors;
+        multiRhsFactors.reserve(factors.size());
+        RIFTFactorId localFactorId = 0;
+        for (const auto &factor : factors) {
+          multiRhsFactors.push_back(BuildRotationMultiRHSFactorFromVectorized(
+              localFactorId++, factor.keys, factor.A, factor.b, d,
+              partition.local_robot_id));
+        }
+        rotationMultiRhsInterfaceFactors.push_back(CondenseMultiRHSFactors(
+            rotationMultiRhsNextId++, FactorType::ROTATION, d, multiRhsFactors,
+            partition.interior_poses,
+            removeAnchorKey(partition.boundary_poses, params),
+            partition.local_robot_id));
+      });
+    }
     CondensedFactor condensed;
     condensed.owner_robot_id = partition.local_robot_id;
     condensed.factor_type = FactorType::ROTATION;
@@ -3212,14 +3255,37 @@ Matrix TEDCCISolver::InitializeSingleProcessDirect(
 
   const auto crossRotationFactors =
       CCIFactorBuilder::BuildRotationFactors(d, shared, params);
-  const std::vector<PoseKey> rotationInterfaceKeys =
-      collectInterfaceKeys(rotationCondensed, crossRotationFactors);
+  if (useRiftRotationMultiRhs) {
+    for (const auto &factor : crossRotationFactors) {
+      const int owner = factor.keys.empty() ? -1 : factor.keys.front().robot_id;
+      rotationMultiRhsInterfaceFactors.push_back(
+          BuildRotationMultiRHSFactorFromVectorized(
+              rotationMultiRhsNextId++, factor.keys, factor.A, factor.b, d,
+              owner));
+    }
+  }
+  std::vector<PoseKey> rotationInterfaceKeys;
   TEDCCIStats rotationInterfaceStats;
   Vector rotationInterfaceSolution;
   interfaceSolveMs += elapsedMilliseconds([&]() {
-    rotationInterfaceSolution = solveInterfaceForMode(
-        rotationCondensed, crossRotationFactors, rotationBlockDim, partitions,
-        params, &rotationInterfaceStats);
+    if (useRiftRotationMultiRhs) {
+      const InterfaceProblem rotationProblem =
+          InterfaceProblemBuilder::BuildFromInterfaceFactors(
+              FactorType::ROTATION, d, d, d,
+              rotationMultiRhsInterfaceFactors);
+      const Matrix multiRhsSolution =
+          SolveInterfaceProblemWithRIFTExact(rotationProblem, params,
+                                             &rotationInterfaceStats);
+      rotationInterfaceKeys = rotationProblem.variables;
+      rotationInterfaceSolution = vectorizeRotationMultiRhsSolution(
+          rotationInterfaceKeys, multiRhsSolution, d);
+    } else {
+      rotationInterfaceKeys =
+          collectInterfaceKeys(rotationCondensed, crossRotationFactors);
+      rotationInterfaceSolution = solveInterfaceForMode(
+          rotationCondensed, crossRotationFactors, rotationBlockDim, partitions,
+          params, &rotationInterfaceStats);
+    }
   });
   std::map<PoseKey, Vector> relaxedRotationBlocks =
       splitSolutionByKey(rotationInterfaceKeys, rotationInterfaceSolution,
