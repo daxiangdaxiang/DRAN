@@ -3462,6 +3462,26 @@ Matrix TEDCCISolver::InitializeSingleProcessDirect(
     stats->rift_directed_messages_sent =
         rotationInterfaceStats.rift_directed_messages_sent +
         translationInterfaceStats.rift_directed_messages_sent;
+    stats->rift_cak_iterations =
+        rotationInterfaceStats.rift_cak_iterations +
+        translationInterfaceStats.rift_cak_iterations;
+    stats->rift_cak_scalar_reductions =
+        rotationInterfaceStats.rift_cak_scalar_reductions +
+        translationInterfaceStats.rift_cak_scalar_reductions;
+    stats->rift_cak_scalar_reduction_bytes =
+        rotationInterfaceStats.rift_cak_scalar_reduction_bytes +
+        translationInterfaceStats.rift_cak_scalar_reduction_bytes;
+    const bool hasRiftCakResidual =
+        rotationInterfaceStats.rift_cak_final_residual >= 0.0 ||
+        translationInterfaceStats.rift_cak_final_residual >= 0.0;
+    stats->rift_cak_final_residual =
+        hasRiftCakResidual
+            ? std::hypot(
+                  std::max(0.0,
+                           rotationInterfaceStats.rift_cak_final_residual),
+                  std::max(0.0,
+                           translationInterfaceStats.rift_cak_final_residual))
+            : -1.0;
     stats->rift_symbolic_ms = rotationInterfaceStats.rift_symbolic_ms +
                               translationInterfaceStats.rift_symbolic_ms;
     stats->rift_message_qr_ms =

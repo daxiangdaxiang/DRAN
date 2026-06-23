@@ -267,6 +267,83 @@ double interfaceResidualNorm(const InterfaceProblem &problem,
   return std::sqrt(squared);
 }
 
+std::vector<int> interfaceOwnerRobots(const InterfaceProblem &problem) {
+  std::set<int> owners;
+  for (const auto &factor : problem.factors) {
+    if (factor.owner_robot >= 0) {
+      owners.insert(factor.owner_robot);
+    }
+  }
+  if (owners.empty()) {
+    owners.insert(0);
+  }
+  return std::vector<int>(owners.begin(), owners.end());
+}
+
+void recordTreeScalarReduction(const std::vector<int> &robots,
+                               RIFTStats *stats,
+                               DecentralizationGuard *guard) {
+  if (stats != nullptr) {
+    ++stats->cak_scalar_reductions;
+  }
+  if (robots.size() < 2) {
+    return;
+  }
+  const std::size_t bytes_per_message = sizeof(double);
+  for (std::size_t i = 0; i + 1 < robots.size(); ++i) {
+    const int src = robots[i + 1];
+    const int dst = robots[i];
+    if (stats != nullptr) {
+      stats->cak_scalar_reduction_bytes += bytes_per_message;
+      stats->actual_message_bytes += bytes_per_message;
+      ++stats->directed_messages_sent;
+    }
+    if (guard != nullptr) {
+      guard->RecordMessage(src, dst, bytes_per_message);
+    }
+  }
+  for (std::size_t i = 0; i + 1 < robots.size(); ++i) {
+    const int src = robots[i];
+    const int dst = robots[i + 1];
+    if (stats != nullptr) {
+      stats->cak_scalar_reduction_bytes += bytes_per_message;
+      stats->actual_message_bytes += bytes_per_message;
+      ++stats->directed_messages_sent;
+    }
+    if (guard != nullptr) {
+      guard->RecordMessage(src, dst, bytes_per_message);
+    }
+  }
+}
+
+double treeReducedDot(const Matrix &A, const Matrix &B,
+                      const std::vector<int> &robots, RIFTStats *stats,
+                      DecentralizationGuard *guard) {
+  if (A.rows() != B.rows() || A.cols() != B.cols()) {
+    throw std::invalid_argument("RIFT-CAK dot dimensions mismatch");
+  }
+  recordTreeScalarReduction(robots, stats, guard);
+  return (A.array() * B.array()).sum();
+}
+
+Matrix normalEquationRhs(const InterfaceProblem &problem) {
+  Matrix rhs = Matrix::Zero(
+      static_cast<int>(problem.variables.size()) * problem.block_dim,
+      problem.rhs_dim);
+  for (const auto &factor : problem.factors) {
+    Matrix contribution = factor.A.transpose() * factor.B;
+    for (std::size_t k = 0; k < factor.scope.size(); ++k) {
+      const int globalOffset =
+          keyOffset(problem.variables, factor.scope[k], problem.block_dim);
+      const int localOffset = static_cast<int>(k) * problem.block_dim;
+      rhs.block(globalOffset, 0, problem.block_dim, problem.rhs_dim) +=
+          contribution.block(localOffset, 0, problem.block_dim,
+                             problem.rhs_dim);
+    }
+  }
+  return rhs;
+}
+
 std::size_t estimatedMessageBytesForSeparator(std::size_t separatorBlocks,
                                               int blockDim, int rhsDim) {
   const std::size_t sepDim = separatorBlocks * static_cast<std::size_t>(blockDim);
@@ -1394,6 +1471,136 @@ Vector RIFTExactSolver::Solve(const InterfaceProblem &problem,
   return SolveMatrix(problem, tree, params, stats, guard).col(0);
 }
 
+Matrix RIFTCAKSolver::ApplyNormalOperator(const InterfaceProblem &problem,
+                                          const Matrix &X) {
+  if (X.rows() !=
+      static_cast<int>(problem.variables.size()) * problem.block_dim) {
+    throw std::invalid_argument("RIFT-CAK HApply input row mismatch");
+  }
+  Matrix Hx = Matrix::Zero(X.rows(), X.cols());
+  for (const auto &factor : problem.factors) {
+    Matrix localX(factor.A.cols(), X.cols());
+    for (std::size_t k = 0; k < factor.scope.size(); ++k) {
+      const int globalOffset =
+          keyOffset(problem.variables, factor.scope[k], problem.block_dim);
+      const int localOffset = static_cast<int>(k) * problem.block_dim;
+      localX.block(localOffset, 0, problem.block_dim, X.cols()) =
+          X.block(globalOffset, 0, problem.block_dim, X.cols());
+    }
+    const Matrix contribution = factor.A.transpose() * (factor.A * localX);
+    for (std::size_t k = 0; k < factor.scope.size(); ++k) {
+      const int globalOffset =
+          keyOffset(problem.variables, factor.scope[k], problem.block_dim);
+      const int localOffset = static_cast<int>(k) * problem.block_dim;
+      Hx.block(globalOffset, 0, problem.block_dim, X.cols()) +=
+          contribution.block(localOffset, 0, problem.block_dim, X.cols());
+    }
+  }
+  return Hx;
+}
+
+Matrix RIFTCAKSolver::SolveMatrix(const InterfaceProblem &problem,
+                                  const RIFTParams &params,
+                                  RIFTStats *stats,
+                                  DecentralizationGuard *guard) {
+  if (problem.block_dim <= 0 || problem.rhs_dim <= 0) {
+    throw std::invalid_argument("RIFT-CAK problem dimensions must be positive");
+  }
+
+  RIFTStats localStats;
+  localStats.selected_backend = RIFTInterfaceBackend::RIFT_CAK;
+  const std::vector<int> robots = interfaceOwnerRobots(problem);
+  localStats.num_host_robots = static_cast<int>(robots.size());
+  for (const auto &factor : problem.factors) {
+    localStats.max_clique_blocks =
+        std::max(localStats.max_clique_blocks,
+                 static_cast<int>(factor.scope.size()));
+  }
+
+  const Matrix rhs = normalEquationRhs(problem);
+  Matrix X = Matrix::Zero(rhs.rows(), rhs.cols());
+  const int maxIterations =
+      std::max(20, 4 * static_cast<int>(rhs.rows()) + 20);
+  const double tolerance = 1e-12;
+  double maxFinalResidual = 0.0;
+
+  localStats.message_qr_ms += elapsedMilliseconds([&]() {
+    for (int col = 0; col < rhs.cols(); ++col) {
+      Vector x = Vector::Zero(rhs.rows());
+      Vector r = rhs.col(col);
+      Vector p = r;
+      Matrix rMat = r;
+      double rr = treeReducedDot(rMat, rMat, robots, &localStats, guard);
+      const double initialResidual = std::sqrt(std::max(0.0, rr));
+      if (initialResidual <= tolerance) {
+        X.col(col) = x;
+        continue;
+      }
+      for (int iter = 0; iter < maxIterations; ++iter) {
+        Matrix pMat = p;
+        const Vector Hp = ApplyNormalOperator(problem, pMat).col(0);
+        Matrix hpMat = Hp;
+        const double pHp =
+            treeReducedDot(pMat, hpMat, robots, &localStats, guard);
+        if (pHp <= std::numeric_limits<double>::epsilon()) {
+          break;
+        }
+        const double alpha = rr / pHp;
+        x += alpha * p;
+        r -= alpha * Hp;
+        rMat = r;
+        const double nextRr =
+            treeReducedDot(rMat, rMat, robots, &localStats, guard);
+        ++localStats.cak_iterations;
+        const double residual = std::sqrt(std::max(0.0, nextRr));
+        if (residual <= tolerance * (1.0 + initialResidual)) {
+          rr = nextRr;
+          break;
+        }
+        const double beta = nextRr / rr;
+        p = r + beta * p;
+        rr = nextRr;
+      }
+      X.col(col) = x;
+      maxFinalResidual =
+          std::max(maxFinalResidual,
+                   (ApplyNormalOperator(problem, X.col(col)) - rhs.col(col))
+                       .norm());
+    }
+  });
+
+  localStats.cak_final_residual = maxFinalResidual;
+  localStats.final_interface_residual = interfaceResidualNorm(problem, X);
+  if (guard != nullptr) {
+    if (params.forbid_global_interface_matrix) {
+      guard->AssertNoGlobalInterfaceMatrixConstructed();
+    }
+    if (params.forbid_direct_solver_in_deployment) {
+      guard->AssertNoDirectSolverCalled();
+    }
+    if (params.forbid_collectives) {
+      guard->AssertNoCollectiveCommunication();
+    }
+    localStats.used_global_matrix = guard->used_global_matrix();
+    localStats.used_direct_solver = guard->used_direct_solver();
+    localStats.used_collective = guard->used_collective();
+  }
+  if (stats != nullptr) {
+    *stats = localStats;
+  }
+  return X;
+}
+
+Vector RIFTCAKSolver::Solve(const InterfaceProblem &problem,
+                            const RIFTParams &params, RIFTStats *stats,
+                            DecentralizationGuard *guard) {
+  if (problem.rhs_dim != 1) {
+    throw std::invalid_argument(
+        "RIFT-CAK vector Solve requires a single RHS; use SolveMatrix");
+  }
+  return SolveMatrix(problem, params, stats, guard).col(0);
+}
+
 Matrix SolveInterfaceProblemWithRIFTExact(
     const InterfaceProblem &problem, const TEDCCIParams &params,
     TEDCCIStats *stats) {
@@ -1403,8 +1610,7 @@ Matrix SolveInterfaceProblemWithRIFTExact(
     throw std::invalid_argument(
         "RIFT-IF deployment mode requires rift_exact or rift_auto backend");
   }
-  if (riftParams.backend == RIFTInterfaceBackend::RIFT_CAK ||
-      riftParams.backend == RIFTInterfaceBackend::RIFT_ASYNC_SCHUR) {
+  if (riftParams.backend == RIFTInterfaceBackend::RIFT_ASYNC_SCHUR) {
     throw std::invalid_argument(
         "RIFT-IF requested backend is not implemented in this MVP");
   }
@@ -1421,14 +1627,20 @@ Matrix SolveInterfaceProblemWithRIFTExact(
   riftParams.forbid_collectives = params.rift_forbid_collectives;
 
   RIFTStats riftStats;
-  InterfaceCliqueTree tree;
-  double symbolicMs = elapsedMilliseconds([&]() {
-    tree = InterfaceCliqueTreeBuilder::Build(problem, riftParams);
-  });
+  double symbolicMs = 0.0;
   DecentralizationGuard guard;
-  Matrix solution =
-      RIFTExactSolver::SolveMatrix(problem, tree, riftParams, &riftStats,
-                                   &guard);
+  Matrix solution;
+  if (riftParams.backend == RIFTInterfaceBackend::RIFT_CAK) {
+    solution = RIFTCAKSolver::SolveMatrix(problem, riftParams, &riftStats,
+                                          &guard);
+  } else {
+    InterfaceCliqueTree tree;
+    symbolicMs = elapsedMilliseconds([&]() {
+      tree = InterfaceCliqueTreeBuilder::Build(problem, riftParams);
+    });
+    solution = RIFTExactSolver::SolveMatrix(problem, tree, riftParams,
+                                            &riftStats, &guard);
+  }
   riftStats.symbolic_ms += symbolicMs;
 
   if (stats != nullptr) {
@@ -1458,6 +1670,11 @@ Matrix SolveInterfaceProblemWithRIFTExact(
         riftStats.estimated_routed_message_bytes;
     stats->rift_actual_message_bytes = riftStats.actual_message_bytes;
     stats->rift_directed_messages_sent = riftStats.directed_messages_sent;
+    stats->rift_cak_iterations = riftStats.cak_iterations;
+    stats->rift_cak_scalar_reductions = riftStats.cak_scalar_reductions;
+    stats->rift_cak_scalar_reduction_bytes =
+        riftStats.cak_scalar_reduction_bytes;
+    stats->rift_cak_final_residual = riftStats.cak_final_residual;
     stats->rift_symbolic_ms = riftStats.symbolic_ms;
     stats->rift_message_qr_ms = riftStats.message_qr_ms;
     stats->rift_belief_solve_ms = riftStats.belief_solve_ms;

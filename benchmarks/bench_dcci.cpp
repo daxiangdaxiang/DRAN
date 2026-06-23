@@ -867,6 +867,14 @@ void printBenchLine(const Options &options, size_t numPoses, size_t numEdges,
             << result.tedStats.rift_actual_message_bytes
             << " rift_directed_messages_sent="
             << result.tedStats.rift_directed_messages_sent
+            << " rift_cak_iterations="
+            << result.tedStats.rift_cak_iterations
+            << " rift_cak_scalar_reductions="
+            << result.tedStats.rift_cak_scalar_reductions
+            << " rift_cak_scalar_reduction_bytes="
+            << result.tedStats.rift_cak_scalar_reduction_bytes
+            << " rift_cak_final_residual="
+            << result.tedStats.rift_cak_final_residual
             << " rift_symbolic_ms=" << result.tedStats.rift_symbolic_ms
             << " rift_message_qr_ms="
             << result.tedStats.rift_message_qr_ms

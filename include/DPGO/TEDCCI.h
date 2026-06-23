@@ -136,6 +136,10 @@ struct TEDCCIStats {
   std::size_t rift_estimated_routed_message_bytes = 0;
   std::size_t rift_actual_message_bytes = 0;
   int rift_directed_messages_sent = 0;
+  int rift_cak_iterations = 0;
+  int rift_cak_scalar_reductions = 0;
+  std::size_t rift_cak_scalar_reduction_bytes = 0;
+  double rift_cak_final_residual = -1.0;
   double rift_symbolic_ms = 0.0;
   double rift_message_qr_ms = 0.0;
   double rift_belief_solve_ms = 0.0;

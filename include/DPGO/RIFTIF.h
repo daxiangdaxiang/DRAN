@@ -47,6 +47,10 @@ struct RIFTStats {
   int directed_messages_sent = 0;
   int directed_messages_reused = 0;
   int directed_messages_invalidated = 0;
+  int cak_iterations = 0;
+  int cak_scalar_reductions = 0;
+  std::size_t cak_scalar_reduction_bytes = 0;
+  double cak_final_residual = -1.0;
   double symbolic_ms = 0.0;
   double message_qr_ms = 0.0;
   double belief_solve_ms = 0.0;
@@ -323,6 +327,21 @@ class RIFTExactSolver {
 
   static Vector Solve(const InterfaceProblem &problem,
                       const InterfaceCliqueTree &tree,
+                      const RIFTParams &params, RIFTStats *stats = nullptr,
+                      DecentralizationGuard *guard = nullptr);
+};
+
+class RIFTCAKSolver {
+ public:
+  static Matrix ApplyNormalOperator(const InterfaceProblem &problem,
+                                    const Matrix &X);
+
+  static Matrix SolveMatrix(const InterfaceProblem &problem,
+                            const RIFTParams &params,
+                            RIFTStats *stats = nullptr,
+                            DecentralizationGuard *guard = nullptr);
+
+  static Vector Solve(const InterfaceProblem &problem,
                       const RIFTParams &params, RIFTStats *stats = nullptr,
                       DecentralizationGuard *guard = nullptr);
 };

@@ -50,8 +50,14 @@ Current implementation status:
   local dependencies, dirty or missing messages are recomputed, and the updated
   full cache can be returned for the next update epoch.  The default call path
   still rebuilds all directed messages.
-- CAK, Async-Schur, component fallback, and reconnect merge are planned
-  follow-up backends.
+- `--interface-backend rift_cak` selects the first communication-avoiding
+  Krylov fallback slice.  It exposes a matrix-free interface normal-operator
+  apply, solves the normal equations with CG, and accounts dot products through
+  a tree scalar reducer rather than an MPI collective.  This MVP is intended
+  for high-treewidth fallback validation on small well-conditioned interface
+  systems; s-step/pipelined CAK and stronger preconditioning are later phases.
+- Async-Schur, component fallback, and reconnect merge are planned follow-up
+  backends.
 
 The RIFT exact path must not call `InterfaceDirectSolver::Solve`, must not call
 `stackInterfaceSystem*`, and must not use MPI collectives.  Small 2D/3D tests

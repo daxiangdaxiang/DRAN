@@ -228,6 +228,49 @@ std::vector<InterfaceFactor> makeIncrementalRiftFactors(bool includeLoopFactor) 
   return factors;
 }
 
+Matrix explicitNormalMatrixForTest(const InterfaceProblem &problem) {
+  const int cols =
+      static_cast<int>(problem.variables.size()) * problem.block_dim;
+  Matrix H = Matrix::Zero(cols, cols);
+  for (const auto &factor : problem.factors) {
+    Matrix expanded = Matrix::Zero(factor.A.rows(), cols);
+    for (std::size_t k = 0; k < factor.scope.size(); ++k) {
+      const int dst = static_cast<int>(
+                          std::distance(problem.variables.begin(),
+                                        std::find(problem.variables.begin(),
+                                                  problem.variables.end(),
+                                                  factor.scope[k]))) *
+                      problem.block_dim;
+      const int src = static_cast<int>(k) * problem.block_dim;
+      expanded.block(0, dst, factor.A.rows(), problem.block_dim) =
+          factor.A.block(0, src, factor.A.rows(), problem.block_dim);
+    }
+    H.noalias() += expanded.transpose() * expanded;
+  }
+  return H;
+}
+
+Matrix explicitNormalRhsForTest(const InterfaceProblem &problem) {
+  const int rows =
+      static_cast<int>(problem.variables.size()) * problem.block_dim;
+  Matrix rhs = Matrix::Zero(rows, problem.rhs_dim);
+  for (const auto &factor : problem.factors) {
+    const Matrix local = factor.A.transpose() * factor.B;
+    for (std::size_t k = 0; k < factor.scope.size(); ++k) {
+      const int dst = static_cast<int>(
+                          std::distance(problem.variables.begin(),
+                                        std::find(problem.variables.begin(),
+                                                  problem.variables.end(),
+                                                  factor.scope[k]))) *
+                      problem.block_dim;
+      const int src = static_cast<int>(k) * problem.block_dim;
+      rhs.block(dst, 0, problem.block_dim, problem.rhs_dim) +=
+          local.block(src, 0, problem.block_dim, problem.rhs_dim);
+    }
+  }
+  return rhs;
+}
+
 RelativeSEMeasurement makeMeasurement(size_t i, size_t j,
                                       const std::vector<int> &owner,
                                       const Matrix &Ri, const Vector &ti,
@@ -654,6 +697,77 @@ TEST(testDPGO, RIFTIFIncrementalDirtyMessagesReuseCacheAndMatchFullRebuild) {
             0u);
 }
 
+TEST(testDPGO, RIFTIFCAKHApplyMatchesExplicitNormalProduct) {
+  const InterfaceProblem problem =
+      InterfaceProblemBuilder::BuildFromInterfaceFactors(
+          FactorType::TRANSLATION, 2, 1, 1,
+          makeIncrementalRiftFactors(/*includeLoopFactor=*/true));
+  const Matrix H = explicitNormalMatrixForTest(problem);
+  Matrix X = deterministicMatrix(H.cols(), 1, 0.31);
+
+  const Matrix applied = RIFTCAKSolver::ApplyNormalOperator(problem, X);
+
+  EXPECT_LT((applied - H * X).norm(), 1e-12);
+}
+
+TEST(testDPGO, RIFTIFCAKSolverMatchesDirectNormalEquationAndUsesTreeReduce) {
+  const InterfaceProblem problem =
+      InterfaceProblemBuilder::BuildFromInterfaceFactors(
+          FactorType::TRANSLATION, 2, 1, 1,
+          makeIncrementalRiftFactors(/*includeLoopFactor=*/true));
+  const Matrix H = explicitNormalMatrixForTest(problem);
+  const Matrix rhs = explicitNormalRhsForTest(problem);
+  Eigen::ColPivHouseholderQR<Matrix> qr(H);
+  const Matrix direct = qr.solve(rhs);
+
+  RIFTParams params;
+  params.forbid_global_interface_matrix = true;
+  params.forbid_direct_solver_in_deployment = true;
+  params.forbid_collectives = true;
+  RIFTStats stats;
+  DecentralizationGuard guard;
+  const Matrix cak =
+      RIFTCAKSolver::SolveMatrix(problem, params, &stats, &guard);
+
+  EXPECT_LT((cak - direct).norm(), 1e-8);
+  EXPECT_EQ(stats.selected_backend, RIFTInterfaceBackend::RIFT_CAK);
+  EXPECT_GT(stats.cak_iterations, 0);
+  EXPECT_GT(stats.cak_scalar_reductions, 0);
+  EXPECT_GT(stats.cak_scalar_reduction_bytes, 0u);
+  EXPECT_LT(stats.cak_final_residual, 1e-8);
+  EXPECT_FALSE(stats.used_global_matrix);
+  EXPECT_FALSE(stats.used_direct_solver);
+  EXPECT_FALSE(stats.used_collective);
+}
+
+TEST(testDPGO, RIFTIFCAKBackendRunsThroughTEDRoute) {
+  const InterfaceProblem problem =
+      InterfaceProblemBuilder::BuildFromInterfaceFactors(
+          FactorType::TRANSLATION, 2, 1, 1,
+          makeIncrementalRiftFactors(/*includeLoopFactor=*/true));
+  const Matrix exact =
+      RIFTExactSolver::SolveMatrix(problem, makeIncrementalRiftChainTree(true),
+                                   RIFTParams());
+
+  TEDCCIParams params;
+  params.mode = CCIInitMode::TED_CCI_RIFT_IF;
+  params.rift_interface_backend = RIFTInterfaceBackend::RIFT_CAK;
+  params.rift_forbid_direct_interface_solver = true;
+  params.rift_forbid_global_interface_matrix = true;
+  params.rift_forbid_collectives = true;
+  TEDCCIStats stats;
+  const Matrix cak = SolveInterfaceProblemWithRIFTExact(problem, params,
+                                                       &stats);
+
+  EXPECT_LT((cak - exact).norm(), 1e-8);
+  EXPECT_EQ(stats.rift_selected_backend, RIFTInterfaceBackend::RIFT_CAK);
+  EXPECT_GT(stats.rift_cak_iterations, 0);
+  EXPECT_GT(stats.rift_cak_scalar_reductions, 0);
+  EXPECT_GT(stats.rift_cak_scalar_reduction_bytes, 0u);
+  EXPECT_LT(stats.rift_cak_final_residual, 1e-8);
+  EXPECT_FALSE(stats.rift_used_collective);
+}
+
 TEST(testDPGO, RIFTIFNetworkZeroDelayMatchesRootlessSchedulerOrdering) {
   InterfaceCliqueTree tree;
   tree.cliques.resize(3);
@@ -947,7 +1061,7 @@ TEST(testDPGO, RIFTIFDirectBackendRejectedInDeploymentPath) {
                std::invalid_argument);
 }
 
-TEST(testDPGO, RIFTIFRejectsUnimplementedFallbackBackends) {
+TEST(testDPGO, RIFTIFRejectsUnimplementedAsyncSchurFallbackBackend) {
   const int blockDim = 4;
   const PoseKey a{0, 1};
   CondensedFactor factor;
@@ -959,7 +1073,7 @@ TEST(testDPGO, RIFTIFRejectsUnimplementedFallbackBackends) {
 
   TEDCCIParams params;
   params.mode = CCIInitMode::TED_CCI_RIFT_IF;
-  params.rift_interface_backend = RIFTInterfaceBackend::RIFT_CAK;
+  params.rift_interface_backend = RIFTInterfaceBackend::RIFT_ASYNC_SCHUR;
   TEDCCIStats stats;
   EXPECT_THROW(SolveTEDInterfaceWithRIFTExact({factor}, {}, blockDim, {},
                                              params, &stats),
