@@ -496,6 +496,45 @@ TEST(testDPGO, RIFTIFGuardDetectsDirectSolverUse) {
   EXPECT_THROW(guard.AssertNoDirectSolverCalled(), std::runtime_error);
 }
 
+TEST(testDPGO, RIFTIFGuardDetectsGlobalMatrixCollectiveAndAllFactorReceiver) {
+  DecentralizationGuard matrixGuard;
+  matrixGuard.RecordGlobalInterfaceMatrixConstruction();
+  EXPECT_THROW(matrixGuard.AssertNoGlobalInterfaceMatrixConstructed(),
+               std::runtime_error);
+
+  DecentralizationGuard collectiveGuard;
+  collectiveGuard.RecordCollectiveCall("MPI_Allreduce");
+  EXPECT_THROW(collectiveGuard.AssertNoCollectiveCommunication(),
+               std::runtime_error);
+
+  DecentralizationGuard receiverGuard;
+  receiverGuard.RecordFactorTransfer(0, 7, 0);
+  receiverGuard.RecordFactorTransfer(1, 7, 1);
+  receiverGuard.RecordFactorTransfer(2, 7, 2);
+  EXPECT_THROW(receiverGuard.AssertNoNodeReceivedAllFactors(3),
+               std::runtime_error);
+}
+
+TEST(testDPGO, RIFTIFDirectBackendRejectedInDeploymentPath) {
+  const int blockDim = 2;
+  const PoseKey a{0, 1};
+  CondensedFactor factor;
+  factor.owner_robot_id = 0;
+  factor.factor_type = FactorType::TRANSLATION;
+  factor.boundary_keys = {a};
+  factor.Abar = Matrix::Identity(blockDim, blockDim);
+  factor.bbar = Vector::Ones(blockDim);
+
+  TEDCCIParams params;
+  params.mode = CCIInitMode::TED_CCI_RIFT_IF;
+  params.rift_interface_backend = RIFTInterfaceBackend::DIRECT_ORACLE;
+  params.rift_forbid_direct_interface_solver = true;
+  TEDCCIStats stats;
+  EXPECT_THROW(SolveTEDInterfaceWithRIFTExact({factor}, {}, blockDim, {},
+                                             params, &stats),
+               std::invalid_argument);
+}
+
 TEST(testDPGO, RIFTIFRejectsUnimplementedFallbackBackends) {
   const int blockDim = 4;
   const PoseKey a{0, 1};
