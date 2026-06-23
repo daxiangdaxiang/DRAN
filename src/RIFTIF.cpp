@@ -396,6 +396,71 @@ std::size_t estimatedMessageBytesForSeparator(std::size_t separatorBlocks,
          sepDim * static_cast<std::size_t>(rhsDim) * sizeof(double);
 }
 
+void PopulateCliqueTreeStats(const InterfaceCliqueTree &tree,
+                             RIFTStats *stats) {
+  if (stats == nullptr) {
+    return;
+  }
+  stats->num_cliques = static_cast<int>(tree.cliques.size());
+  stats->num_tree_edges = static_cast<int>(tree.edges.size());
+  std::map<int, int> hostedCliqueCounts;
+  for (const auto &clique : tree.cliques) {
+    stats->max_clique_blocks =
+        std::max(stats->max_clique_blocks,
+                 static_cast<int>(clique.variables.size()));
+    if (clique.host_robot >= 0) {
+      stats->max_host_clique_load =
+          std::max(stats->max_host_clique_load,
+                   ++hostedCliqueCounts[clique.host_robot]);
+    }
+  }
+  stats->num_host_robots = static_cast<int>(hostedCliqueCounts.size());
+  for (const auto &edge : tree.edges) {
+    stats->max_separator_blocks =
+        std::max(stats->max_separator_blocks,
+                 static_cast<int>(edge.separator.size()));
+    stats->estimated_message_bytes += 2u * edge.estimated_message_bytes;
+    const int hostA = tree.cliques.at(edge.a).host_robot;
+    const int hostB = tree.cliques.at(edge.b).host_robot;
+    const int routeHops = hostA == hostB ? 0 : 1;
+    if (routeHops > 0) {
+      ++stats->cross_host_tree_edges;
+      stats->estimated_route_hops += 2 * routeHops;
+      stats->estimated_routed_message_bytes +=
+          2u * edge.estimated_message_bytes *
+          static_cast<std::size_t>(routeHops);
+    }
+  }
+}
+
+bool ExactSymbolicGateAllows(const InterfaceProblem &problem,
+                             const RIFTParams &params,
+                             const RIFTStats &stats) {
+  const int maxSeparatorAllowed =
+      problem.dimension == 2 ? params.exact_max_separator_blocks_2d
+                             : params.exact_max_separator_blocks_3d;
+  return stats.max_separator_blocks <= maxSeparatorAllowed &&
+         stats.estimated_message_bytes <= params.exact_max_message_bytes;
+}
+
+void CopySymbolicStatsInto(const RIFTStats &symbolicStats,
+                           RIFTStats *target) {
+  if (target == nullptr) {
+    return;
+  }
+  target->num_cliques = symbolicStats.num_cliques;
+  target->num_tree_edges = symbolicStats.num_tree_edges;
+  target->num_host_robots = symbolicStats.num_host_robots;
+  target->max_host_clique_load = symbolicStats.max_host_clique_load;
+  target->cross_host_tree_edges = symbolicStats.cross_host_tree_edges;
+  target->estimated_route_hops = symbolicStats.estimated_route_hops;
+  target->max_clique_blocks = symbolicStats.max_clique_blocks;
+  target->max_separator_blocks = symbolicStats.max_separator_blocks;
+  target->estimated_message_bytes = symbolicStats.estimated_message_bytes;
+  target->estimated_routed_message_bytes =
+      symbolicStats.estimated_routed_message_bytes;
+}
+
 }  // namespace
 
 void DecentralizationGuard::RecordGlobalInterfaceMatrixConstruction() {
@@ -1327,42 +1392,8 @@ Matrix RIFTExactSolver::SolveMatrix(const InterfaceProblem &problem,
 
   RIFTStats localStats;
   localStats.selected_backend = RIFTInterfaceBackend::RIFT_EXACT;
-  localStats.num_cliques = static_cast<int>(tree.cliques.size());
-  localStats.num_tree_edges = static_cast<int>(tree.edges.size());
-  std::map<int, int> hostedCliqueCounts;
-  for (const auto &clique : tree.cliques) {
-    localStats.max_clique_blocks =
-        std::max(localStats.max_clique_blocks,
-                 static_cast<int>(clique.variables.size()));
-    if (clique.host_robot >= 0) {
-      localStats.max_host_clique_load =
-          std::max(localStats.max_host_clique_load,
-                   ++hostedCliqueCounts[clique.host_robot]);
-    }
-  }
-  localStats.num_host_robots = static_cast<int>(hostedCliqueCounts.size());
-  for (const auto &edge : tree.edges) {
-    localStats.max_separator_blocks =
-        std::max(localStats.max_separator_blocks,
-                 static_cast<int>(edge.separator.size()));
-    localStats.estimated_message_bytes += 2u * edge.estimated_message_bytes;
-    const int hostA = tree.cliques.at(edge.a).host_robot;
-    const int hostB = tree.cliques.at(edge.b).host_robot;
-    const int routeHops = hostA == hostB ? 0 : 1;
-    if (routeHops > 0) {
-      ++localStats.cross_host_tree_edges;
-      localStats.estimated_route_hops += 2 * routeHops;
-      localStats.estimated_routed_message_bytes +=
-          2u * edge.estimated_message_bytes *
-          static_cast<std::size_t>(routeHops);
-    }
-  }
-
-  const int maxSeparatorAllowed =
-      problem.dimension == 2 ? params.exact_max_separator_blocks_2d
-                             : params.exact_max_separator_blocks_3d;
-  if (localStats.max_separator_blocks > maxSeparatorAllowed ||
-      localStats.estimated_message_bytes > params.exact_max_message_bytes) {
+  PopulateCliqueTreeStats(tree, &localStats);
+  if (!ExactSymbolicGateAllows(problem, params, localStats)) {
     throw std::runtime_error("RIFT-IF exact symbolic gate rejected interface");
   }
 
@@ -2226,8 +2257,24 @@ Matrix SolveInterfaceProblemWithRIFTExact(
     symbolicMs = elapsedMilliseconds([&]() {
       tree = InterfaceCliqueTreeBuilder::Build(problem, riftParams);
     });
-    solution = RIFTExactSolver::SolveMatrix(problem, tree, riftParams,
-                                            &riftStats, &guard);
+    if (riftParams.backend == RIFTInterfaceBackend::RIFT_AUTO) {
+      RIFTStats symbolicStats;
+      PopulateCliqueTreeStats(tree, &symbolicStats);
+      const bool exactReady =
+          InterfaceCliqueTreeBuilder::VerifyRunningIntersection(tree) &&
+          ExactSymbolicGateAllows(problem, riftParams, symbolicStats);
+      if (exactReady) {
+        solution = RIFTExactSolver::SolveMatrix(problem, tree, riftParams,
+                                                &riftStats, &guard);
+      } else {
+        solution = RIFTCAKSolver::SolveMatrix(problem, riftParams, &riftStats,
+                                              &guard);
+        CopySymbolicStatsInto(symbolicStats, &riftStats);
+      }
+    } else {
+      solution = RIFTExactSolver::SolveMatrix(problem, tree, riftParams,
+                                              &riftStats, &guard);
+    }
   }
   riftStats.symbolic_ms += symbolicMs;
 

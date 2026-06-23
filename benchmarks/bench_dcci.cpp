@@ -653,6 +653,10 @@ std::size_t methodCommRounds(const BenchRunResult &result) {
   if (result.mode == BenchInitMode::DPCG_CCI) {
     return result.dcciStats.communication.num_scalar_reductions;
   }
+  if (result.mode == BenchInitMode::TED_CCI_RIFT_IF) {
+    return static_cast<std::size_t>(
+        std::max(0, result.tedStats.rift_directed_messages_sent));
+  }
   if (result.mode == BenchInitMode::TED_CCI_ASYNC_DD) {
     return static_cast<std::size_t>(
         std::max(0, result.tedStats.async_dd_iterations));
@@ -679,7 +683,7 @@ TEDCCIParams makeTedParams(const Options &options, BenchInitMode mode) {
   params.rift_interface_backend = options.interfaceBackend;
   if (mode == BenchInitMode::TED_CCI_RIFT_IF &&
       params.rift_interface_backend == RIFTInterfaceBackend::DIRECT_ORACLE) {
-    params.rift_interface_backend = RIFTInterfaceBackend::RIFT_EXACT;
+    params.rift_interface_backend = RIFTInterfaceBackend::RIFT_AUTO;
   }
   params.rift_use_rotation_multi_rhs = options.useRotationMultiRhs;
   params.rift_forbid_direct_interface_solver =
@@ -756,6 +760,7 @@ void printBenchLine(const Options &options, size_t numPoses, size_t numEdges,
             << " dataset=" << options.datasetName
             << " g2o=" << g2oLabel
             << " dimension=" << options.dimension
+            << " dim=" << options.dimension
             << " poses=" << numPoses
             << " edges=" << numEdges
             << " robots=" << options.robots
@@ -765,10 +770,12 @@ void printBenchLine(const Options &options, size_t numPoses, size_t numEdges,
             << " dcci_ms=" << result.methodMs
             << " cci_cost=" << cciCost
             << " dcci_cost=" << result.methodCost
+            << " rift_cost=" << result.methodCost
             << " cost_abs_gap=" << result.methodCostAbsGap
             << " cost_rel_gap=" << result.methodCostRelGap
             << " relative_pose_matrix_diff="
             << result.methodRelativePoseMatrixDiff
+            << " pose_diff=" << result.methodRelativePoseMatrixDiff
             << " rotation_iters=" << result.dcciStats.rotation_pcg.iters
             << " translation_iters=" << result.dcciStats.translation_pcg.iters
             << " rotation_residual="
@@ -845,6 +852,8 @@ void printBenchLine(const Options &options, size_t numPoses, size_t numEdges,
             << result.tedStats.async_dd_final_residual
             << " rift_selected_backend="
             << RIFTInterfaceBackendName(result.tedStats.rift_selected_backend)
+            << " selected_backend="
+            << RIFTInterfaceBackendName(result.tedStats.rift_selected_backend)
             << " rift_num_cliques=" << result.tedStats.rift_num_cliques
             << " rift_num_tree_edges=" << result.tedStats.rift_num_tree_edges
             << " rift_num_host_robots="
@@ -865,7 +874,11 @@ void printBenchLine(const Options &options, size_t numPoses, size_t numEdges,
             << result.tedStats.rift_estimated_routed_message_bytes
             << " rift_actual_message_bytes="
             << result.tedStats.rift_actual_message_bytes
+            << " actual_message_bytes="
+            << result.tedStats.rift_actual_message_bytes
             << " rift_directed_messages_sent="
+            << result.tedStats.rift_directed_messages_sent
+            << " directed_messages="
             << result.tedStats.rift_directed_messages_sent
             << " rift_cak_iterations="
             << result.tedStats.rift_cak_iterations
@@ -876,17 +889,29 @@ void printBenchLine(const Options &options, size_t numPoses, size_t numEdges,
             << " rift_cak_final_residual="
             << result.tedStats.rift_cak_final_residual
             << " rift_symbolic_ms=" << result.tedStats.rift_symbolic_ms
+            << " symbolic_ms=" << result.tedStats.rift_symbolic_ms
+            << " factor_transfer_ms=0"
             << " rift_message_qr_ms="
             << result.tedStats.rift_message_qr_ms
+            << " message_qr_ms=" << result.tedStats.rift_message_qr_ms
             << " rift_belief_solve_ms="
             << result.tedStats.rift_belief_solve_ms
+            << " belief_solve_ms=" << result.tedStats.rift_belief_solve_ms
             << " rift_final_interface_residual="
+            << result.tedStats.rift_final_interface_residual
+            << " final_interface_residual="
             << result.tedStats.rift_final_interface_residual
             << " rift_used_global_matrix="
             << result.tedStats.rift_used_global_matrix
+            << " used_global_matrix="
+            << result.tedStats.rift_used_global_matrix
             << " rift_used_direct_solver="
             << result.tedStats.rift_used_direct_solver
+            << " used_direct_solver="
+            << result.tedStats.rift_used_direct_solver
             << " rift_used_collective="
+            << result.tedStats.rift_used_collective
+            << " used_collective="
             << result.tedStats.rift_used_collective
             << std::endl;
 }

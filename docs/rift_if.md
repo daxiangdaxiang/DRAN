@@ -10,6 +10,11 @@ Current implementation status:
 
 - `ted_cci_rift_if` is available through `bench-dcci --initialization-mode`.
 - `--interface-backend rift_exact` selects the exact rootless message backend.
+- `--interface-backend rift_auto` first builds the symbolic clique tree.  If
+  the exact backend satisfies the separator/message-byte gate it selects
+  `rift_exact`; otherwise the stable-network benchmark path selects
+  `rift_cak` and keeps the exact symbolic clique statistics in the report.
+  Dynamic-network tests can still explicitly request `rift_async_schur`.
 - `--forbid-direct-interface-solver true`,
   `--forbid-global-interface-matrix true`, and
   `--forbid-collectives true` enable deployment guard checks.
@@ -74,3 +79,23 @@ The RIFT exact path must not call `InterfaceDirectSolver::Solve`, must not call
 `stackInterfaceSystem*`, and must not use MPI collectives.  Small 2D/3D tests
 compare RIFT against centralized CCI, direct-interface oracle results, and the
 legacy vectorized RIFT rotation representation.
+
+PR14 seven-dataset benchmarking:
+
+```sh
+python scripts/run_rift_if_seven.py \
+  --bench-bin build/bin/bench-dcci \
+  --output-dir results/rift_if_pr14_seven \
+  --num-robots 5 \
+  --max-iters 20000 \
+  --rel-tol 1e-10 \
+  --abs-tol 1e-10
+```
+
+The runner covers `parking-garage`, `sphere`, `torus`, `CSAIL`, `inter`,
+`manhattan`, and `ais2klinik`.  By default it compares `ted_cci_rift_if`,
+`ted_cci_sr_direct`, and `dpcg_cci`; RIFT rows pass the deployment guard flags
+and report PR14 alias columns such as `selected_backend`, `rift_cost`,
+`pose_diff`, `directed_messages`, `actual_message_bytes`, `symbolic_ms`,
+`message_qr_ms`, `belief_solve_ms`, `final_interface_residual`, and
+`used_global_matrix/used_direct_solver/used_collective`.

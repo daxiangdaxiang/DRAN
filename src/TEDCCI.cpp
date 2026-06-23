@@ -3425,13 +3425,29 @@ Matrix TEDCCISolver::InitializeSingleProcessDirect(
     stats->factor_sparse_triplet_nonzeros =
         rotationInterfaceStats.factor_sparse_triplet_nonzeros +
         translationInterfaceStats.factor_sparse_triplet_nonzeros;
-    stats->rift_selected_backend =
-        rotationInterfaceStats.rift_selected_backend ==
-                RIFTInterfaceBackend::RIFT_EXACT ||
-            translationInterfaceStats.rift_selected_backend ==
-                RIFTInterfaceBackend::RIFT_EXACT
-            ? RIFTInterfaceBackend::RIFT_EXACT
-            : rotationInterfaceStats.rift_selected_backend;
+    if (rotationInterfaceStats.rift_selected_backend ==
+            translationInterfaceStats.rift_selected_backend) {
+      stats->rift_selected_backend =
+          rotationInterfaceStats.rift_selected_backend;
+    } else if (rotationInterfaceStats.rift_selected_backend ==
+                   RIFTInterfaceBackend::RIFT_ASYNC_SCHUR ||
+               translationInterfaceStats.rift_selected_backend ==
+                   RIFTInterfaceBackend::RIFT_ASYNC_SCHUR) {
+      stats->rift_selected_backend = RIFTInterfaceBackend::RIFT_ASYNC_SCHUR;
+    } else if (rotationInterfaceStats.rift_selected_backend ==
+                   RIFTInterfaceBackend::RIFT_CAK ||
+               translationInterfaceStats.rift_selected_backend ==
+                   RIFTInterfaceBackend::RIFT_CAK) {
+      stats->rift_selected_backend = RIFTInterfaceBackend::RIFT_CAK;
+    } else if (rotationInterfaceStats.rift_selected_backend ==
+                   RIFTInterfaceBackend::RIFT_EXACT ||
+               translationInterfaceStats.rift_selected_backend ==
+                   RIFTInterfaceBackend::RIFT_EXACT) {
+      stats->rift_selected_backend = RIFTInterfaceBackend::RIFT_EXACT;
+    } else {
+      stats->rift_selected_backend =
+          rotationInterfaceStats.rift_selected_backend;
+    }
     stats->rift_num_cliques = rotationInterfaceStats.rift_num_cliques +
                               translationInterfaceStats.rift_num_cliques;
     stats->rift_num_tree_edges =

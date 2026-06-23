@@ -121,3 +121,46 @@ def test_bench_dcci_reports_optional_nonlinear_refinement_cost():
   assert row["final_pgo_cost_after_nonlinear_refinement_available"] == "1"
   assert float(row["final_pgo_cost_after_nonlinear_refinement"]) >= 0.0
   assert float(row["nonlinear_refinement_ms"]) >= 0.0
+
+
+def test_bench_dcci_reports_rift_pr14_fields_and_comm_rounds():
+  bench = Path("build/bin/bench-dcci")
+  if not bench.exists():
+    raise AssertionError("build/bin/bench-dcci must be built before this test")
+
+  proc = subprocess.run([
+      str(bench),
+      "--dimension", "2",
+      "--poses", "8",
+      "--robots", "4",
+      "--initialization-mode", "ted_cci_rift_if",
+      "--interface-backend", "rift_auto",
+      "--use-rotation-multi-rhs", "true",
+      "--forbid-direct-interface-solver", "true",
+      "--forbid-global-interface-matrix", "true",
+      "--forbid-collectives", "true",
+  ], check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+  row = parse_bench_line(proc.stdout)
+  assert row["initialization_mode"] == "ted_cci_rift_if"
+  assert row["selected_backend"] in {
+      "rift_exact",
+      "rift_cak",
+      "rift_async_schur",
+  }
+  assert row["rift_selected_backend"] == row["selected_backend"]
+  assert row["dim"] == row["dimension"]
+  assert row["rift_cost"] == row["method_cost"]
+  assert row["pose_diff"] == row["method_relative_pose_matrix_diff"]
+  assert row["directed_messages"] == row["rift_directed_messages_sent"]
+  assert row["actual_message_bytes"] == row["rift_actual_message_bytes"]
+  assert row["symbolic_ms"] == row["rift_symbolic_ms"]
+  assert row["message_qr_ms"] == row["rift_message_qr_ms"]
+  assert row["belief_solve_ms"] == row["rift_belief_solve_ms"]
+  assert row["final_interface_residual"] == row["rift_final_interface_residual"]
+  assert row["used_global_matrix"] == "0"
+  assert row["used_direct_solver"] == "0"
+  assert row["used_collective"] == "0"
+  assert row["method_comm_rounds"] == row["directed_messages"]
+  assert float(row["method_cost_abs_gap"]) < 1e-8
+  assert float(row["method_relative_pose_matrix_diff"]) < 1e-8

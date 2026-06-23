@@ -805,6 +805,67 @@ TEST(testDPGO, RIFTIFCAKBackendRunsThroughTEDRoute) {
   EXPECT_FALSE(stats.rift_used_collective);
 }
 
+TEST(testDPGO, RIFTIFAutoSelectsExactWhenSymbolicGateAllows) {
+  const InterfaceProblem problem =
+      InterfaceProblemBuilder::BuildFromInterfaceFactors(
+          FactorType::TRANSLATION, 2, 1, 1,
+          makeIncrementalRiftFactors(/*includeLoopFactor=*/false));
+
+  TEDCCIParams params;
+  params.mode = CCIInitMode::TED_CCI_RIFT_IF;
+  params.rift_interface_backend = RIFTInterfaceBackend::RIFT_AUTO;
+  params.rift_forbid_direct_interface_solver = true;
+  params.rift_forbid_global_interface_matrix = true;
+  params.rift_forbid_collectives = true;
+  TEDCCIStats stats;
+  const Matrix solution = SolveInterfaceProblemWithRIFTExact(problem, params,
+                                                            &stats);
+  const Matrix exact =
+      RIFTExactSolver::SolveMatrix(problem, makeIncrementalRiftChainTree(false),
+                                   RIFTParams());
+
+  EXPECT_LT((solution - exact).norm(), 1e-10);
+  EXPECT_EQ(stats.rift_selected_backend, RIFTInterfaceBackend::RIFT_EXACT);
+  EXPECT_GT(stats.rift_num_cliques, 0);
+  EXPECT_GT(stats.rift_directed_messages_sent, 0);
+  EXPECT_FALSE(stats.rift_used_direct_solver);
+  EXPECT_FALSE(stats.rift_used_global_matrix);
+  EXPECT_FALSE(stats.rift_used_collective);
+}
+
+TEST(testDPGO, RIFTIFAutoFallsBackToCAKWhenExactGateRejects) {
+  const InterfaceProblem problem =
+      InterfaceProblemBuilder::BuildFromInterfaceFactors(
+          FactorType::TRANSLATION, 2, 1, 1,
+          makeIncrementalRiftFactors(/*includeLoopFactor=*/true));
+  const Matrix H = explicitNormalMatrixForTest(problem);
+  const Matrix rhs = explicitNormalRhsForTest(problem);
+  const Matrix direct = H.colPivHouseholderQr().solve(rhs);
+
+  TEDCCIParams params;
+  params.mode = CCIInitMode::TED_CCI_RIFT_IF;
+  params.rift_interface_backend = RIFTInterfaceBackend::RIFT_AUTO;
+  params.rift_exact_max_separator_blocks_2d = 0;
+  params.rift_exact_max_message_bytes = 0;
+  params.rift_forbid_direct_interface_solver = true;
+  params.rift_forbid_global_interface_matrix = true;
+  params.rift_forbid_collectives = true;
+  TEDCCIStats stats;
+  const Matrix autoSolution = SolveInterfaceProblemWithRIFTExact(problem,
+                                                                params,
+                                                                &stats);
+
+  EXPECT_LT((autoSolution - direct).norm(), 1e-8);
+  EXPECT_EQ(stats.rift_selected_backend, RIFTInterfaceBackend::RIFT_CAK);
+  EXPECT_GT(stats.rift_num_cliques, 0);
+  EXPECT_GT(stats.rift_max_separator_blocks, 0);
+  EXPECT_GT(stats.rift_cak_iterations, 0);
+  EXPECT_GT(stats.rift_cak_scalar_reductions, 0);
+  EXPECT_FALSE(stats.rift_used_direct_solver);
+  EXPECT_FALSE(stats.rift_used_global_matrix);
+  EXPECT_FALSE(stats.rift_used_collective);
+}
+
 TEST(testDPGO, RIFTIFAsyncSchurResidualDecreasesAndMatchesDirectSmallSPD) {
   const InterfaceProblem problem =
       InterfaceProblemBuilder::BuildFromInterfaceFactors(
