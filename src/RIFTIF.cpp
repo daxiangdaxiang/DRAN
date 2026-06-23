@@ -220,6 +220,15 @@ RIFTMessage computeDirectedMessage(
   msg.header.stage = problem.stage;
   msg.header.src = src;
   msg.header.dst = dst;
+  for (const auto *factor : factors) {
+    msg.header.graph_epoch =
+        std::max(msg.header.graph_epoch, factor->graph_epoch);
+  }
+  for (const auto *incoming_message : incoming) {
+    msg.header.graph_epoch =
+        std::max(msg.header.graph_epoch,
+                 incoming_message->header.graph_epoch);
+  }
   msg.separator_keys = separator;
   msg.R = compressed.first;
   msg.D = compressed.second;
@@ -870,6 +879,151 @@ bool RIFTRootlessScheduler::CliqueBeliefReady(RIFTCliqueId alpha) const {
   return true;
 }
 
+RIFTDirtyMessageTracker::RIFTDirtyMessageTracker(
+    const InterfaceCliqueTree &tree) {
+  for (const auto &clique : tree.cliques) {
+    if (clique.id < 0) {
+      throw std::invalid_argument("RIFT dirty tracker clique id is invalid");
+    }
+    if (neighbors_.count(clique.id) != 0) {
+      throw std::invalid_argument("RIFT dirty tracker duplicate clique id");
+    }
+    neighbors_[clique.id] =
+        std::set<RIFTCliqueId>(clique.neighbors.begin(),
+                               clique.neighbors.end());
+    for (const RIFTFactorId factor_id : clique.assigned_factors) {
+      if (factor_owner_clique_.count(factor_id) != 0) {
+        throw std::invalid_argument(
+            "RIFT dirty tracker duplicate factor assignment");
+      }
+      factor_owner_clique_[factor_id] = clique.id;
+    }
+  }
+
+  for (const auto &entry : neighbors_) {
+    const RIFTCliqueId clique_id = entry.first;
+    for (const RIFTCliqueId neighbor : entry.second) {
+      ValidateClique(neighbor);
+      const auto reverse = neighbors_.find(neighbor);
+      if (reverse == neighbors_.end() ||
+          reverse->second.count(clique_id) == 0) {
+        throw std::invalid_argument(
+            "RIFT dirty tracker clique neighbors must be reciprocal");
+      }
+    }
+  }
+}
+
+void RIFTDirtyMessageTracker::CacheMessage(const DirectedCliqueEdge &edge) {
+  ValidateDirectedEdge(edge);
+  cached_messages_.insert(edge);
+}
+
+void RIFTDirtyMessageTracker::MarkFactorUpdated(RIFTFactorId factor_id) {
+  const auto owner = factor_owner_clique_.find(factor_id);
+  if (owner == factor_owner_clique_.end()) {
+    throw std::invalid_argument("RIFT dirty tracker factor is unknown");
+  }
+  MarkCliqueDirty(owner->second);
+}
+
+void RIFTDirtyMessageTracker::MarkFactorUpdated(
+    RIFTFactorId factor_id, RIFTCliqueId assigned_clique) {
+  ValidateClique(assigned_clique);
+  factor_owner_clique_[factor_id] = assigned_clique;
+  MarkCliqueDirty(assigned_clique);
+}
+
+void RIFTDirtyMessageTracker::MarkCliqueDirty(RIFTCliqueId clique_id) {
+  ValidateClique(clique_id);
+  dirty_cliques_.insert(clique_id);
+
+  std::queue<DirectedCliqueEdge> queue;
+  for (const RIFTCliqueId neighbor : neighbors_.at(clique_id)) {
+    InvalidateDirectedMessage(DirectedCliqueEdge{clique_id, neighbor},
+                              &queue);
+  }
+
+  while (!queue.empty()) {
+    const DirectedCliqueEdge dirty_edge = queue.front();
+    queue.pop();
+    for (const RIFTCliqueId next : neighbors_.at(dirty_edge.dst)) {
+      if (next == dirty_edge.src) {
+        continue;
+      }
+      InvalidateDirectedMessage(DirectedCliqueEdge{dirty_edge.dst, next},
+                                &queue);
+    }
+  }
+}
+
+bool RIFTDirtyMessageTracker::IsMessageCached(
+    const DirectedCliqueEdge &edge) const {
+  return cached_messages_.count(edge) != 0;
+}
+
+bool RIFTDirtyMessageTracker::IsMessageInvalidated(
+    const DirectedCliqueEdge &edge) const {
+  return invalidated_messages_.count(edge) != 0;
+}
+
+std::vector<DirectedCliqueEdge>
+RIFTDirtyMessageTracker::InvalidatedMessages() const {
+  return std::vector<DirectedCliqueEdge>(invalidated_messages_.begin(),
+                                         invalidated_messages_.end());
+}
+
+std::vector<RIFTCliqueId> RIFTDirtyMessageTracker::DirtyCliques() const {
+  return std::vector<RIFTCliqueId>(dirty_cliques_.begin(),
+                                   dirty_cliques_.end());
+}
+
+int RIFTDirtyMessageTracker::CachedMessageCount() const {
+  return static_cast<int>(cached_messages_.size());
+}
+
+int RIFTDirtyMessageTracker::ReusableCachedMessageCount() const {
+  int count = 0;
+  for (const auto &edge : cached_messages_) {
+    if (invalidated_messages_.count(edge) == 0) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+int RIFTDirtyMessageTracker::FullDirectedMessageCount() const {
+  int count = 0;
+  for (const auto &entry : neighbors_) {
+    count += static_cast<int>(entry.second.size());
+  }
+  return count;
+}
+
+void RIFTDirtyMessageTracker::ValidateClique(RIFTCliqueId clique_id) const {
+  if (neighbors_.count(clique_id) == 0) {
+    throw std::invalid_argument("RIFT dirty tracker clique is unknown");
+  }
+}
+
+void RIFTDirtyMessageTracker::ValidateDirectedEdge(
+    const DirectedCliqueEdge &edge) const {
+  ValidateClique(edge.src);
+  ValidateClique(edge.dst);
+  if (neighbors_.at(edge.src).count(edge.dst) == 0) {
+    throw std::invalid_argument("RIFT dirty tracker edge is not adjacent");
+  }
+}
+
+void RIFTDirtyMessageTracker::InvalidateDirectedMessage(
+    const DirectedCliqueEdge &edge, std::queue<DirectedCliqueEdge> *queue) {
+  ValidateDirectedEdge(edge);
+  const bool inserted = invalidated_messages_.insert(edge).second;
+  if (inserted && queue != nullptr) {
+    queue->push(edge);
+  }
+}
+
 RIFTP2PNetworkSimulator::RIFTP2PNetworkSimulator(std::uint64_t seed)
     : rng_(seed) {}
 
@@ -1035,7 +1189,14 @@ Matrix RIFTExactSolver::SolveMatrix(const InterfaceProblem &problem,
                                     const InterfaceCliqueTree &tree,
                                     const RIFTParams &params,
                                     RIFTStats *stats,
-                                    DecentralizationGuard *guard) {
+                                    DecentralizationGuard *guard,
+                                    const std::map<DirectedCliqueEdge,
+                                                   RIFTMessage>
+                                        *reusable_messages,
+                                    const RIFTDirtyMessageTracker
+                                        *dirty_tracker,
+                                    std::map<DirectedCliqueEdge, RIFTMessage>
+                                        *updated_messages) {
   if (problem.block_dim <= 0 || problem.rhs_dim <= 0) {
     throw std::invalid_argument("RIFT-IF problem dimensions must be positive");
   }
@@ -1109,14 +1270,33 @@ Matrix RIFTExactSolver::SolveMatrix(const InterfaceProblem &problem,
         throw std::runtime_error("RIFT-IF scheduler deadlock");
       }
       for (const auto &edge : ready) {
-        RIFTMessage msg = computeDirectedMessage(problem, tree, factorById,
-                                                 edge.src, edge.dst, messages);
-        const std::size_t bytes = messageBytes(msg);
-        localStats.actual_message_bytes += bytes;
-        ++localStats.directed_messages_sent;
-        if (guard != nullptr) {
-          guard->RecordMessage(tree.cliques.at(edge.src).host_robot,
-                               tree.cliques.at(edge.dst).host_robot, bytes);
+        bool reused = false;
+        RIFTMessage msg;
+        if (reusable_messages != nullptr) {
+          const auto cached = reusable_messages->find(edge);
+          const bool invalidated =
+              dirty_tracker != nullptr &&
+              dirty_tracker->IsMessageInvalidated(edge);
+          if (cached != reusable_messages->end() && !invalidated) {
+            msg = cached->second;
+            reused = true;
+            ++localStats.directed_messages_reused;
+          }
+        }
+        if (!reused) {
+          if (dirty_tracker != nullptr &&
+              dirty_tracker->IsMessageInvalidated(edge)) {
+            ++localStats.directed_messages_invalidated;
+          }
+          msg = computeDirectedMessage(problem, tree, factorById, edge.src,
+                                       edge.dst, messages);
+          const std::size_t bytes = messageBytes(msg);
+          localStats.actual_message_bytes += bytes;
+          ++localStats.directed_messages_sent;
+          if (guard != nullptr) {
+            guard->RecordMessage(tree.cliques.at(edge.src).host_robot,
+                                 tree.cliques.at(edge.dst).host_robot, bytes);
+          }
         }
         scheduler.MarkMessageSent(edge.src, edge.dst);
         scheduler.OnMessageReceived(msg);
@@ -1196,6 +1376,9 @@ Matrix RIFTExactSolver::SolveMatrix(const InterfaceProblem &problem,
   }
   if (stats != nullptr) {
     *stats = localStats;
+  }
+  if (updated_messages != nullptr) {
+    *updated_messages = messages;
   }
   return solution;
 }

@@ -38,8 +38,20 @@ Current implementation status:
   disconnected.  Current tests use it around `RIFTRootlessScheduler`; CAK,
   Async-Schur, component fallback, and reconnect merge will consume the same
   transport layer in later phases.
-- CAK, Async-Schur, component fallback, reconnect merge, and incremental
-  dirty-message updates are planned follow-up backends.
+- `RIFTDirtyMessageTracker` provides the first incremental exact-cache slice.
+  A changed interface factor marks its assigned clique dirty, invalidates that
+  clique's outgoing messages, and then propagates invalidation only along
+  directed message dependencies: if `u -> v` is dirty, then `v -> w` is dirty
+  for `w != u`.  The reverse message `v -> u` remains reusable unless another
+  dirty wave requires it, matching the square-root message definition that
+  excludes the destination side from its dependencies.
+- `RIFTExactSolver::SolveMatrix` can now accept a reusable directed-message
+  cache plus a dirty tracker.  In that mode, unchanged messages are reused as
+  local dependencies, dirty or missing messages are recomputed, and the updated
+  full cache can be returned for the next update epoch.  The default call path
+  still rebuilds all directed messages.
+- CAK, Async-Schur, component fallback, and reconnect merge are planned
+  follow-up backends.
 
 The RIFT exact path must not call `InterfaceDirectSolver::Solve`, must not call
 `stackInterfaceSystem*`, and must not use MPI collectives.  Small 2D/3D tests

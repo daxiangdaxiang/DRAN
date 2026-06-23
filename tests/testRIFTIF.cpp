@@ -116,6 +116,118 @@ RIFTNetworkMessage makeNetworkMessage(int src, int dst, std::uint64_t seq,
   return message;
 }
 
+InterfaceCliqueTree makeChainMessageTree(int numCliques) {
+  InterfaceCliqueTree tree;
+  tree.cliques.resize(numCliques);
+  for (int i = 0; i < numCliques; ++i) {
+    tree.cliques[i].id = i;
+    if (i > 0) {
+      tree.cliques[i].neighbors.push_back(i - 1);
+      InterfaceCliqueTreeEdge edge;
+      edge.a = i - 1;
+      edge.b = i;
+      edge.estimated_message_bytes = 32;
+      tree.edges.push_back(edge);
+    }
+    if (i + 1 < numCliques) {
+      tree.cliques[i].neighbors.push_back(i + 1);
+    }
+  }
+  return tree;
+}
+
+std::set<DirectedCliqueEdge> directedEdgeSet(
+    const std::vector<DirectedCliqueEdge> &edges) {
+  return std::set<DirectedCliqueEdge>(edges.begin(), edges.end());
+}
+
+void cacheAllDirectedMessages(const InterfaceCliqueTree &tree,
+                              RIFTDirtyMessageTracker *tracker) {
+  for (const auto &clique : tree.cliques) {
+    for (const RIFTCliqueId neighbor : clique.neighbors) {
+      tracker->CacheMessage(DirectedCliqueEdge{clique.id, neighbor});
+    }
+  }
+}
+
+InterfaceFactor makeScalarInterfaceFactor(RIFTFactorId id,
+                                          const std::vector<PoseKey> &scope,
+                                          int rows, double phase,
+                                          int ownerRobot,
+                                          std::uint64_t epoch = 0) {
+  InterfaceFactor factor;
+  factor.id = id;
+  factor.stage = FactorType::TRANSLATION;
+  factor.scope = scope;
+  factor.A =
+      deterministicMatrix(rows, static_cast<int>(scope.size()), phase);
+  factor.B.resize(rows, 1);
+  factor.B.col(0) = deterministicVector(rows, phase + 0.37);
+  factor.owner_robot = ownerRobot;
+  factor.graph_epoch = epoch;
+  return factor;
+}
+
+InterfaceCliqueTree makeIncrementalRiftChainTree(bool includeLoopFactor) {
+  const PoseKey a{0, 0};
+  const PoseKey b{0, 1};
+  const PoseKey c{1, 2};
+  const PoseKey d{1, 3};
+
+  InterfaceCliqueTree tree;
+  tree.cliques.resize(3);
+  tree.cliques[0].id = 0;
+  tree.cliques[0].host_robot = 0;
+  tree.cliques[0].variables = {a, b};
+  tree.cliques[0].assigned_factors = {0, 1};
+  tree.cliques[0].neighbors = {1};
+
+  tree.cliques[1].id = 1;
+  tree.cliques[1].host_robot = 1;
+  tree.cliques[1].variables = {b, c};
+  tree.cliques[1].assigned_factors = includeLoopFactor
+                                         ? std::vector<RIFTFactorId>{2, 5}
+                                         : std::vector<RIFTFactorId>{2};
+  tree.cliques[1].neighbors = {0, 2};
+
+  tree.cliques[2].id = 2;
+  tree.cliques[2].host_robot = 1;
+  tree.cliques[2].variables = {c, d};
+  tree.cliques[2].assigned_factors = {3, 4};
+  tree.cliques[2].neighbors = {1};
+
+  InterfaceCliqueTreeEdge left;
+  left.a = 0;
+  left.b = 1;
+  left.separator = {b};
+  left.estimated_message_bytes = 32;
+  InterfaceCliqueTreeEdge right;
+  right.a = 1;
+  right.b = 2;
+  right.separator = {c};
+  right.estimated_message_bytes = 32;
+  tree.edges = {left, right};
+  return tree;
+}
+
+std::vector<InterfaceFactor> makeIncrementalRiftFactors(bool includeLoopFactor) {
+  const PoseKey a{0, 0};
+  const PoseKey b{0, 1};
+  const PoseKey c{1, 2};
+  const PoseKey d{1, 3};
+  std::vector<InterfaceFactor> factors = {
+      makeScalarInterfaceFactor(0, {a}, 2, 0.11, 0),
+      makeScalarInterfaceFactor(1, {a, b}, 4, 0.23, 0),
+      makeScalarInterfaceFactor(2, {b, c}, 4, 0.41, 1),
+      makeScalarInterfaceFactor(3, {c, d}, 4, 0.67, 1),
+      makeScalarInterfaceFactor(4, {d}, 2, 0.89, 1)};
+  if (includeLoopFactor) {
+    factors.push_back(makeScalarInterfaceFactor(5, {b, c}, 3, 1.13, 1,
+                                                /*epoch=*/7));
+  }
+  return factors;
+}
+
 RelativeSEMeasurement makeMeasurement(size_t i, size_t j,
                                       const std::vector<int> &owner,
                                       const Matrix &Ri, const Vector &ti,
@@ -412,6 +524,134 @@ TEST(testDPGO, RIFTIFRootlessSchedulerCompletesAllDirectedMessages) {
   EXPECT_TRUE(scheduler.CliqueBeliefReady(0));
   EXPECT_TRUE(scheduler.CliqueBeliefReady(1));
   EXPECT_TRUE(scheduler.CliqueBeliefReady(2));
+}
+
+TEST(testDPGO, RIFTIFDirtyTrackerInvalidatesDirectedDependenciesOnly) {
+  {
+    const InterfaceCliqueTree tree = makeChainMessageTree(3);
+    RIFTDirtyMessageTracker tracker(tree);
+    cacheAllDirectedMessages(tree, &tracker);
+    tracker.MarkCliqueDirty(1);
+    const std::set<DirectedCliqueEdge> expected = {
+        DirectedCliqueEdge{1, 0}, DirectedCliqueEdge{1, 2}};
+    EXPECT_EQ(directedEdgeSet(tracker.InvalidatedMessages()), expected);
+    EXPECT_EQ(tracker.FullDirectedMessageCount(), 4);
+    EXPECT_EQ(static_cast<int>(tracker.InvalidatedMessages().size()), 2);
+    EXPECT_EQ(tracker.ReusableCachedMessageCount(), 2);
+    EXPECT_FALSE(tracker.IsMessageInvalidated(DirectedCliqueEdge{0, 1}));
+    EXPECT_FALSE(tracker.IsMessageInvalidated(DirectedCliqueEdge{2, 1}));
+  }
+
+  {
+    const InterfaceCliqueTree tree = makeChainMessageTree(4);
+    RIFTDirtyMessageTracker tracker(tree);
+    cacheAllDirectedMessages(tree, &tracker);
+    tracker.MarkCliqueDirty(0);
+    const std::set<DirectedCliqueEdge> expected = {
+        DirectedCliqueEdge{0, 1}, DirectedCliqueEdge{1, 2},
+        DirectedCliqueEdge{2, 3}};
+    EXPECT_EQ(directedEdgeSet(tracker.InvalidatedMessages()), expected);
+    EXPECT_EQ(tracker.FullDirectedMessageCount(), 6);
+    EXPECT_EQ(tracker.ReusableCachedMessageCount(), 3);
+    EXPECT_FALSE(tracker.IsMessageInvalidated(DirectedCliqueEdge{1, 0}));
+    EXPECT_FALSE(tracker.IsMessageInvalidated(DirectedCliqueEdge{2, 1}));
+    EXPECT_FALSE(tracker.IsMessageInvalidated(DirectedCliqueEdge{3, 2}));
+  }
+}
+
+TEST(testDPGO, RIFTIFDirtyTrackerMergesMultipleDirtyWaves) {
+  {
+    const InterfaceCliqueTree tree = makeChainMessageTree(3);
+    RIFTDirtyMessageTracker tracker(tree);
+    cacheAllDirectedMessages(tree, &tracker);
+    tracker.MarkCliqueDirty(0);
+    tracker.MarkCliqueDirty(2);
+    EXPECT_EQ(static_cast<int>(tracker.InvalidatedMessages().size()),
+              tracker.FullDirectedMessageCount());
+    EXPECT_EQ(tracker.ReusableCachedMessageCount(), 0);
+  }
+
+  {
+    const InterfaceCliqueTree tree = makeChainMessageTree(3);
+    RIFTDirtyMessageTracker tracker(tree);
+    cacheAllDirectedMessages(tree, &tracker);
+    tracker.MarkCliqueDirty(0);
+    tracker.MarkCliqueDirty(1);
+    const std::set<DirectedCliqueEdge> expected = {
+        DirectedCliqueEdge{0, 1}, DirectedCliqueEdge{1, 0},
+        DirectedCliqueEdge{1, 2}};
+    EXPECT_EQ(directedEdgeSet(tracker.InvalidatedMessages()), expected);
+    EXPECT_EQ(tracker.ReusableCachedMessageCount(), 1);
+    EXPECT_FALSE(tracker.IsMessageInvalidated(DirectedCliqueEdge{2, 1}));
+  }
+}
+
+TEST(testDPGO, RIFTIFIncrementalDirtyMessagesReuseCacheAndMatchFullRebuild) {
+  const InterfaceProblem baseProblem =
+      InterfaceProblemBuilder::BuildFromInterfaceFactors(
+          FactorType::TRANSLATION, 2, 1, 1,
+          makeIncrementalRiftFactors(/*includeLoopFactor=*/false));
+  const InterfaceCliqueTree baseTree =
+      makeIncrementalRiftChainTree(/*includeLoopFactor=*/false);
+  ASSERT_TRUE(InterfaceCliqueTreeBuilder::VerifyRunningIntersection(baseTree));
+
+  RIFTParams params;
+  std::map<DirectedCliqueEdge, RIFTMessage> baseCache;
+  RIFTStats baseStats;
+  RIFTExactSolver::SolveMatrix(baseProblem, baseTree, params, &baseStats,
+                               nullptr, nullptr, nullptr, &baseCache);
+  ASSERT_EQ(baseStats.directed_messages_sent, 4);
+  ASSERT_EQ(static_cast<int>(baseCache.size()), 4);
+
+  const InterfaceProblem updatedProblem =
+      InterfaceProblemBuilder::BuildFromInterfaceFactors(
+          FactorType::TRANSLATION, 2, 1, 1,
+          makeIncrementalRiftFactors(/*includeLoopFactor=*/true));
+  const InterfaceCliqueTree updatedTree =
+      makeIncrementalRiftChainTree(/*includeLoopFactor=*/true);
+  ASSERT_TRUE(InterfaceCliqueTreeBuilder::VerifyRunningIntersection(
+      updatedTree));
+
+  RIFTStats fullStats;
+  std::map<DirectedCliqueEdge, RIFTMessage> fullCache;
+  const Matrix fullRebuild =
+      RIFTExactSolver::SolveMatrix(updatedProblem, updatedTree, params,
+                                   &fullStats, nullptr, nullptr, nullptr,
+                                   &fullCache);
+  ASSERT_EQ(fullStats.directed_messages_sent, 4);
+
+  RIFTDirtyMessageTracker tracker(updatedTree);
+  cacheAllDirectedMessages(updatedTree, &tracker);
+  tracker.MarkFactorUpdated(5);
+  ASSERT_EQ(static_cast<int>(tracker.InvalidatedMessages().size()), 2);
+  ASSERT_LT(static_cast<int>(tracker.InvalidatedMessages().size()),
+            tracker.FullDirectedMessageCount());
+
+  RIFTStats incrementalStats;
+  std::map<DirectedCliqueEdge, RIFTMessage> incrementalCache;
+  const Matrix incremental =
+      RIFTExactSolver::SolveMatrix(updatedProblem, updatedTree, params,
+                                   &incrementalStats, nullptr, &baseCache,
+                                   &tracker, &incrementalCache);
+
+  EXPECT_LT((incremental - fullRebuild).norm(), 1e-10);
+  EXPECT_EQ(incrementalStats.directed_messages_sent, 2);
+  EXPECT_EQ(incrementalStats.directed_messages_reused, 2);
+  EXPECT_EQ(incrementalStats.directed_messages_invalidated, 2);
+  EXPECT_EQ(tracker.ReusableCachedMessageCount(), 2);
+  ASSERT_EQ(incrementalCache.size(), fullCache.size());
+  for (const auto &entry : fullCache) {
+    const auto updated = incrementalCache.find(entry.first);
+    ASSERT_TRUE(updated != incrementalCache.end());
+    EXPECT_LT((updated->second.R - entry.second.R).norm(), 1e-10);
+    EXPECT_LT((updated->second.D - entry.second.D).norm(), 1e-10);
+  }
+  EXPECT_EQ(incrementalCache.at(DirectedCliqueEdge{1, 0}).header.graph_epoch,
+            7u);
+  EXPECT_EQ(incrementalCache.at(DirectedCliqueEdge{1, 2}).header.graph_epoch,
+            7u);
+  EXPECT_EQ(incrementalCache.at(DirectedCliqueEdge{0, 1}).header.graph_epoch,
+            0u);
 }
 
 TEST(testDPGO, RIFTIFNetworkZeroDelayMatchesRootlessSchedulerOrdering) {

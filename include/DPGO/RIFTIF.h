@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <queue>
 #include <random>
 #include <set>
 #include <string>
@@ -44,6 +45,8 @@ struct RIFTStats {
   std::size_t estimated_routed_message_bytes = 0;
   std::size_t actual_message_bytes = 0;
   int directed_messages_sent = 0;
+  int directed_messages_reused = 0;
+  int directed_messages_invalidated = 0;
   double symbolic_ms = 0.0;
   double message_qr_ms = 0.0;
   double belief_solve_ms = 0.0;
@@ -101,6 +104,10 @@ struct DirectedCliqueEdge {
       return src < other.src;
     }
     return dst < other.dst;
+  }
+
+  bool operator==(const DirectedCliqueEdge &other) const {
+    return src == other.src && dst == other.dst;
   }
 };
 
@@ -231,6 +238,37 @@ class RIFTRootlessScheduler {
   std::set<DirectedCliqueEdge> received_;
 };
 
+class RIFTDirtyMessageTracker {
+ public:
+  explicit RIFTDirtyMessageTracker(const InterfaceCliqueTree &tree);
+
+  void CacheMessage(const DirectedCliqueEdge &edge);
+  void MarkFactorUpdated(RIFTFactorId factor_id);
+  void MarkFactorUpdated(RIFTFactorId factor_id,
+                         RIFTCliqueId assigned_clique);
+  void MarkCliqueDirty(RIFTCliqueId clique_id);
+
+  bool IsMessageCached(const DirectedCliqueEdge &edge) const;
+  bool IsMessageInvalidated(const DirectedCliqueEdge &edge) const;
+  std::vector<DirectedCliqueEdge> InvalidatedMessages() const;
+  std::vector<RIFTCliqueId> DirtyCliques() const;
+  int CachedMessageCount() const;
+  int ReusableCachedMessageCount() const;
+  int FullDirectedMessageCount() const;
+
+ private:
+  void ValidateClique(RIFTCliqueId clique_id) const;
+  void ValidateDirectedEdge(const DirectedCliqueEdge &edge) const;
+  void InvalidateDirectedMessage(const DirectedCliqueEdge &edge,
+                                 std::queue<DirectedCliqueEdge> *queue);
+
+  std::map<RIFTCliqueId, std::set<RIFTCliqueId>> neighbors_;
+  std::map<RIFTFactorId, RIFTCliqueId> factor_owner_clique_;
+  std::set<RIFTCliqueId> dirty_cliques_;
+  std::set<DirectedCliqueEdge> cached_messages_;
+  std::set<DirectedCliqueEdge> invalidated_messages_;
+};
+
 class RIFTP2PNetworkSimulator {
  public:
   explicit RIFTP2PNetworkSimulator(std::uint64_t seed = 1);
@@ -275,7 +313,13 @@ class RIFTExactSolver {
                             const InterfaceCliqueTree &tree,
                             const RIFTParams &params,
                             RIFTStats *stats = nullptr,
-                            DecentralizationGuard *guard = nullptr);
+                            DecentralizationGuard *guard = nullptr,
+                            const std::map<DirectedCliqueEdge, RIFTMessage>
+                                *reusable_messages = nullptr,
+                            const RIFTDirtyMessageTracker *dirty_tracker =
+                                nullptr,
+                            std::map<DirectedCliqueEdge, RIFTMessage>
+                                *updated_messages = nullptr);
 
   static Vector Solve(const InterfaceProblem &problem,
                       const InterfaceCliqueTree &tree,
