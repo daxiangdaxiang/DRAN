@@ -126,9 +126,14 @@ struct TEDCCIStats {
       RIFTInterfaceBackend::DIRECT_ORACLE;
   int rift_num_cliques = 0;
   int rift_num_tree_edges = 0;
+  int rift_num_host_robots = 0;
+  int rift_max_host_clique_load = 0;
+  int rift_cross_host_tree_edges = 0;
+  int rift_estimated_route_hops = 0;
   int rift_max_clique_blocks = 0;
   int rift_max_separator_blocks = 0;
   std::size_t rift_estimated_message_bytes = 0;
+  std::size_t rift_estimated_routed_message_bytes = 0;
   std::size_t rift_actual_message_bytes = 0;
   int rift_directed_messages_sent = 0;
   double rift_symbolic_ms = 0.0;

@@ -26,6 +26,11 @@ Current implementation status:
   as TED-CCI local QR condensation.  Directed clique messages remain
   rank-aware and retain the residual rows after QR when an eliminated message
   block is rank-deficient.
+- Clique hosts are assigned by deterministic ownership majority with
+  lowest-robot-id tie breaking.  The current single-process deployment
+  accounting models same-host clique-tree edges as local and different-host
+  edges as one-hop robot-to-robot routes, and reports host count, maximum hosted
+  clique load, cross-host edges, route hops, and routed message bytes.
 - CAK, Async-Schur, network-delay simulation, and incremental dirty-message
   updates are planned follow-up backends.
 

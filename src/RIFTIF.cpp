@@ -886,16 +886,33 @@ Matrix RIFTExactSolver::SolveMatrix(const InterfaceProblem &problem,
   localStats.selected_backend = RIFTInterfaceBackend::RIFT_EXACT;
   localStats.num_cliques = static_cast<int>(tree.cliques.size());
   localStats.num_tree_edges = static_cast<int>(tree.edges.size());
+  std::map<int, int> hostedCliqueCounts;
   for (const auto &clique : tree.cliques) {
     localStats.max_clique_blocks =
         std::max(localStats.max_clique_blocks,
                  static_cast<int>(clique.variables.size()));
+    if (clique.host_robot >= 0) {
+      localStats.max_host_clique_load =
+          std::max(localStats.max_host_clique_load,
+                   ++hostedCliqueCounts[clique.host_robot]);
+    }
   }
+  localStats.num_host_robots = static_cast<int>(hostedCliqueCounts.size());
   for (const auto &edge : tree.edges) {
     localStats.max_separator_blocks =
         std::max(localStats.max_separator_blocks,
                  static_cast<int>(edge.separator.size()));
     localStats.estimated_message_bytes += 2u * edge.estimated_message_bytes;
+    const int hostA = tree.cliques.at(edge.a).host_robot;
+    const int hostB = tree.cliques.at(edge.b).host_robot;
+    const int routeHops = hostA == hostB ? 0 : 1;
+    if (routeHops > 0) {
+      ++localStats.cross_host_tree_edges;
+      localStats.estimated_route_hops += 2 * routeHops;
+      localStats.estimated_routed_message_bytes +=
+          2u * edge.estimated_message_bytes *
+          static_cast<std::size_t>(routeHops);
+    }
   }
 
   const int maxSeparatorAllowed =
@@ -1086,9 +1103,15 @@ Matrix SolveInterfaceProblemWithRIFTExact(
     stats->rift_selected_backend = riftStats.selected_backend;
     stats->rift_num_cliques = riftStats.num_cliques;
     stats->rift_num_tree_edges = riftStats.num_tree_edges;
+    stats->rift_num_host_robots = riftStats.num_host_robots;
+    stats->rift_max_host_clique_load = riftStats.max_host_clique_load;
+    stats->rift_cross_host_tree_edges = riftStats.cross_host_tree_edges;
+    stats->rift_estimated_route_hops = riftStats.estimated_route_hops;
     stats->rift_max_clique_blocks = riftStats.max_clique_blocks;
     stats->rift_max_separator_blocks = riftStats.max_separator_blocks;
     stats->rift_estimated_message_bytes = riftStats.estimated_message_bytes;
+    stats->rift_estimated_routed_message_bytes =
+        riftStats.estimated_routed_message_bytes;
     stats->rift_actual_message_bytes = riftStats.actual_message_bytes;
     stats->rift_directed_messages_sent = riftStats.directed_messages_sent;
     stats->rift_symbolic_ms = riftStats.symbolic_ms;

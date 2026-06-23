@@ -3432,6 +3432,18 @@ Matrix TEDCCISolver::InitializeSingleProcessDirect(
     stats->rift_num_tree_edges =
         rotationInterfaceStats.rift_num_tree_edges +
         translationInterfaceStats.rift_num_tree_edges;
+    stats->rift_num_host_robots =
+        std::max(rotationInterfaceStats.rift_num_host_robots,
+                 translationInterfaceStats.rift_num_host_robots);
+    stats->rift_max_host_clique_load =
+        std::max(rotationInterfaceStats.rift_max_host_clique_load,
+                 translationInterfaceStats.rift_max_host_clique_load);
+    stats->rift_cross_host_tree_edges =
+        rotationInterfaceStats.rift_cross_host_tree_edges +
+        translationInterfaceStats.rift_cross_host_tree_edges;
+    stats->rift_estimated_route_hops =
+        rotationInterfaceStats.rift_estimated_route_hops +
+        translationInterfaceStats.rift_estimated_route_hops;
     stats->rift_max_clique_blocks =
         std::max(rotationInterfaceStats.rift_max_clique_blocks,
                  translationInterfaceStats.rift_max_clique_blocks);
@@ -3441,6 +3453,9 @@ Matrix TEDCCISolver::InitializeSingleProcessDirect(
     stats->rift_estimated_message_bytes =
         rotationInterfaceStats.rift_estimated_message_bytes +
         translationInterfaceStats.rift_estimated_message_bytes;
+    stats->rift_estimated_routed_message_bytes =
+        rotationInterfaceStats.rift_estimated_routed_message_bytes +
+        translationInterfaceStats.rift_estimated_routed_message_bytes;
     stats->rift_actual_message_bytes =
         rotationInterfaceStats.rift_actual_message_bytes +
         translationInterfaceStats.rift_actual_message_bytes;

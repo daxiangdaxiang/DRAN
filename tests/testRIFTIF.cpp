@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -327,6 +328,33 @@ TEST(testDPGO, RIFTIFCliqueTreeCoversFactorsAndRunningIntersection) {
 
   EXPECT_FALSE(tree.cliques.empty());
   EXPECT_TRUE(InterfaceCliqueTreeBuilder::VerifyRunningIntersection(tree));
+  for (const auto &clique : tree.cliques) {
+    EXPECT_GE(clique.host_robot, 0);
+    std::map<int, int> counts;
+    for (const auto &key : clique.variables) {
+      ++counts[key.robot_id];
+    }
+    ASSERT_FALSE(counts.empty());
+    int expectedHost = counts.begin()->first;
+    int expectedCount = counts.begin()->second;
+    for (const auto &entry : counts) {
+      if (entry.second > expectedCount ||
+          (entry.second == expectedCount && entry.first < expectedHost)) {
+        expectedHost = entry.first;
+        expectedCount = entry.second;
+      }
+    }
+    EXPECT_EQ(clique.host_robot, expectedHost);
+  }
+  for (const auto &edge : tree.edges) {
+    ASSERT_GE(edge.a, 0);
+    ASSERT_GE(edge.b, 0);
+    ASSERT_LT(static_cast<std::size_t>(edge.a), tree.cliques.size());
+    ASSERT_LT(static_cast<std::size_t>(edge.b), tree.cliques.size());
+    EXPECT_GE(tree.cliques[edge.a].host_robot, 0);
+    EXPECT_GE(tree.cliques[edge.b].host_robot, 0);
+    EXPECT_GT(edge.estimated_message_bytes, 0u);
+  }
   for (const auto &factor : problem.factors) {
     bool covered = false;
     for (const auto &clique : tree.cliques) {
@@ -405,6 +433,13 @@ TEST(testDPGO, RIFTIFExactMatchesDirectOracleOnSmallInterface) {
   EXPECT_FALSE(stats.used_collective);
   EXPECT_EQ(stats.directed_messages_sent,
             2 * static_cast<int>(tree.edges.size()));
+  EXPECT_GT(stats.num_host_robots, 0);
+  EXPECT_GT(stats.max_host_clique_load, 0);
+  EXPECT_GE(stats.cross_host_tree_edges, 0);
+  EXPECT_EQ(stats.estimated_route_hops,
+            2 * stats.cross_host_tree_edges);
+  EXPECT_LE(stats.estimated_routed_message_bytes,
+            stats.estimated_message_bytes);
 }
 
 TEST(testDPGO, RIFTIFExactPreservesRankDeficientEliminationResidual) {

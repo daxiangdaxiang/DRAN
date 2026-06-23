@@ -32,9 +32,14 @@ struct RIFTStats {
   RIFTInterfaceBackend selected_backend = RIFTInterfaceBackend::DIRECT_ORACLE;
   int num_cliques = 0;
   int num_tree_edges = 0;
+  int num_host_robots = 0;
+  int max_host_clique_load = 0;
+  int cross_host_tree_edges = 0;
+  int estimated_route_hops = 0;
   int max_clique_blocks = 0;
   int max_separator_blocks = 0;
   std::size_t estimated_message_bytes = 0;
+  std::size_t estimated_routed_message_bytes = 0;
   std::size_t actual_message_bytes = 0;
   int directed_messages_sent = 0;
   double symbolic_ms = 0.0;

@@ -847,12 +847,22 @@ void printBenchLine(const Options &options, size_t numPoses, size_t numEdges,
             << RIFTInterfaceBackendName(result.tedStats.rift_selected_backend)
             << " rift_num_cliques=" << result.tedStats.rift_num_cliques
             << " rift_num_tree_edges=" << result.tedStats.rift_num_tree_edges
+            << " rift_num_host_robots="
+            << result.tedStats.rift_num_host_robots
+            << " rift_max_host_clique_load="
+            << result.tedStats.rift_max_host_clique_load
+            << " rift_cross_host_tree_edges="
+            << result.tedStats.rift_cross_host_tree_edges
+            << " rift_estimated_route_hops="
+            << result.tedStats.rift_estimated_route_hops
             << " rift_max_clique_blocks="
             << result.tedStats.rift_max_clique_blocks
             << " rift_max_separator_blocks="
             << result.tedStats.rift_max_separator_blocks
             << " rift_estimated_message_bytes="
             << result.tedStats.rift_estimated_message_bytes
+            << " rift_estimated_routed_message_bytes="
+            << result.tedStats.rift_estimated_routed_message_bytes
             << " rift_actual_message_bytes="
             << result.tedStats.rift_actual_message_bytes
             << " rift_directed_messages_sent="
