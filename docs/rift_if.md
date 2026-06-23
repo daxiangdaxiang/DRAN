@@ -31,8 +31,15 @@ Current implementation status:
   accounting models same-host clique-tree edges as local and different-host
   edges as one-hop robot-to-robot routes, and reports host count, maximum hosted
   clique load, cross-host edges, route hops, and routed message bytes.
-- CAK, Async-Schur, network-delay simulation, and incremental dirty-message
-  updates are planned follow-up backends.
+- `RIFTP2PNetworkSimulator` provides the first solver-neutral event-driven
+  transport layer for RIFT messages.  It supports deterministic seeded latency,
+  jitter, drop probability, reordering, per-directed-link bandwidth
+  serialization, and explicit hold-or-drop behavior while a link is
+  disconnected.  Current tests use it around `RIFTRootlessScheduler`; CAK,
+  Async-Schur, component fallback, and reconnect merge will consume the same
+  transport layer in later phases.
+- CAK, Async-Schur, component fallback, reconnect merge, and incremental
+  dirty-message updates are planned follow-up backends.
 
 The RIFT exact path must not call `InterfaceDirectSolver::Solve`, must not call
 `stackInterfaceSystem*`, and must not use MPI collectives.  Small 2D/3D tests

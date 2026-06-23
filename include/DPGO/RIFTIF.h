@@ -7,8 +7,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <random>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace DPGO {
@@ -117,6 +119,36 @@ struct RIFTMessage {
   Matrix D;
 };
 
+enum class RIFTDisconnectPolicy {
+  HOLD_UNTIL_RECONNECTED,
+  DROP_WHILE_DISCONNECTED,
+};
+
+struct RIFTLinkModel {
+  double latency_mean_ms = 0.0;
+  double latency_jitter_ms = 0.0;
+  double drop_prob = 0.0;
+  double reorder_prob = 0.0;
+  double bandwidth_bytes_per_sec = 0.0;
+  bool bidirectional = true;
+  RIFTDisconnectPolicy disconnect_policy =
+      RIFTDisconnectPolicy::HOLD_UNTIL_RECONNECTED;
+};
+
+struct RIFTNetworkMessage {
+  int src_robot = -1;
+  int dst_robot = -1;
+  std::uint64_t seq = 0;
+  std::size_t payload_bytes = 0;
+  double send_time_ms = 0.0;
+  RIFTMessage rift_message;
+};
+
+struct RIFTDeliveredNetworkMessage {
+  RIFTNetworkMessage message;
+  double delivery_time_ms = 0.0;
+};
+
 struct CliqueSolution {
   RIFTCliqueId clique_id = -1;
   std::vector<InterfaceKey> keys;
@@ -197,6 +229,44 @@ class RIFTRootlessScheduler {
   std::map<RIFTCliqueId, std::set<RIFTCliqueId>> neighbors_;
   std::set<DirectedCliqueEdge> sent_;
   std::set<DirectedCliqueEdge> received_;
+};
+
+class RIFTP2PNetworkSimulator {
+ public:
+  explicit RIFTP2PNetworkSimulator(std::uint64_t seed = 1);
+
+  void SetRandomSeed(std::uint64_t seed);
+  void AddRobot(int robot_id);
+  void AddLink(int a, int b, const RIFTLinkModel &model);
+  void DropLink(int a, int b);
+  void RestoreLink(int a, int b);
+  bool HasLink(int a, int b) const;
+  bool LinkUp(int a, int b) const;
+
+  void Send(RIFTNetworkMessage message);
+  std::vector<RIFTDeliveredNetworkMessage> DeliverReady(double now_ms);
+
+  std::size_t PendingCount() const;
+  std::size_t DroppedCount() const;
+
+ private:
+  struct LinkState {
+    RIFTLinkModel model;
+    bool up = true;
+    double next_available_ms = 0.0;
+  };
+
+  struct PendingEvent {
+    RIFTDeliveredNetworkMessage delivered;
+    std::uint64_t insertion_order = 0;
+  };
+
+  std::map<std::pair<int, int>, LinkState> links_;
+  std::set<int> robots_;
+  std::vector<PendingEvent> pending_;
+  std::uint64_t next_insertion_order_ = 0;
+  std::size_t dropped_count_ = 0;
+  std::mt19937_64 rng_;
 };
 
 class RIFTExactSolver {

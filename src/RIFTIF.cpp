@@ -870,6 +870,167 @@ bool RIFTRootlessScheduler::CliqueBeliefReady(RIFTCliqueId alpha) const {
   return true;
 }
 
+RIFTP2PNetworkSimulator::RIFTP2PNetworkSimulator(std::uint64_t seed)
+    : rng_(seed) {}
+
+void RIFTP2PNetworkSimulator::SetRandomSeed(std::uint64_t seed) {
+  rng_.seed(seed);
+}
+
+void RIFTP2PNetworkSimulator::AddRobot(int robot_id) {
+  if (robot_id < 0) {
+    throw std::invalid_argument("RIFT network robot id must be nonnegative");
+  }
+  robots_.insert(robot_id);
+}
+
+void RIFTP2PNetworkSimulator::AddLink(int a, int b,
+                                      const RIFTLinkModel &model) {
+  if (a < 0 || b < 0 || a == b) {
+    throw std::invalid_argument("RIFT network link endpoints are invalid");
+  }
+  if (model.latency_mean_ms < 0.0 || model.latency_jitter_ms < 0.0 ||
+      model.drop_prob < 0.0 || model.drop_prob > 1.0 ||
+      model.reorder_prob < 0.0 || model.reorder_prob > 1.0 ||
+      model.bandwidth_bytes_per_sec < 0.0) {
+    throw std::invalid_argument("RIFT network link model is invalid");
+  }
+  AddRobot(a);
+  AddRobot(b);
+  links_[{a, b}] = LinkState{model, true, 0.0};
+  if (model.bidirectional) {
+    RIFTLinkModel reverse = model;
+    reverse.bidirectional = false;
+    links_[{b, a}] = LinkState{reverse, true, 0.0};
+  }
+}
+
+void RIFTP2PNetworkSimulator::DropLink(int a, int b) {
+  bool changed = false;
+  for (auto &entry : links_) {
+    const bool forward = entry.first.first == a && entry.first.second == b;
+    const bool reverse = entry.first.first == b && entry.first.second == a;
+    if (forward || reverse) {
+      entry.second.up = false;
+      changed = true;
+    }
+  }
+  if (!changed) {
+    throw std::invalid_argument("RIFT network link does not exist");
+  }
+}
+
+void RIFTP2PNetworkSimulator::RestoreLink(int a, int b) {
+  bool changed = false;
+  for (auto &entry : links_) {
+    const bool forward = entry.first.first == a && entry.first.second == b;
+    const bool reverse = entry.first.first == b && entry.first.second == a;
+    if (forward || reverse) {
+      entry.second.up = true;
+      changed = true;
+    }
+  }
+  if (!changed) {
+    throw std::invalid_argument("RIFT network link does not exist");
+  }
+}
+
+bool RIFTP2PNetworkSimulator::HasLink(int a, int b) const {
+  return links_.count({a, b}) != 0;
+}
+
+bool RIFTP2PNetworkSimulator::LinkUp(int a, int b) const {
+  const auto it = links_.find({a, b});
+  return it != links_.end() && it->second.up;
+}
+
+void RIFTP2PNetworkSimulator::Send(RIFTNetworkMessage message) {
+  if (robots_.count(message.src_robot) == 0 ||
+      robots_.count(message.dst_robot) == 0) {
+    throw std::invalid_argument("RIFT network message endpoint is unknown");
+  }
+  auto link = links_.find({message.src_robot, message.dst_robot});
+  if (link == links_.end()) {
+    throw std::invalid_argument("RIFT network message has no route");
+  }
+  const RIFTLinkModel &model = link->second.model;
+  if (!link->second.up &&
+      model.disconnect_policy == RIFTDisconnectPolicy::DROP_WHILE_DISCONNECTED) {
+    ++dropped_count_;
+    return;
+  }
+
+  std::uniform_real_distribution<double> unit(0.0, 1.0);
+  if (unit(rng_) < model.drop_prob) {
+    ++dropped_count_;
+    return;
+  }
+
+  double latency = model.latency_mean_ms;
+  if (model.latency_jitter_ms > 0.0) {
+    std::uniform_real_distribution<double> jitter(-model.latency_jitter_ms,
+                                                  model.latency_jitter_ms);
+    latency += jitter(rng_);
+  }
+  latency = std::max(0.0, latency);
+  if (unit(rng_) < model.reorder_prob) {
+    std::uniform_real_distribution<double> advance(
+        0.0, latency + model.latency_jitter_ms + 1.0);
+    latency = std::max(0.0, latency - advance(rng_));
+  }
+
+  const double txMs =
+      model.bandwidth_bytes_per_sec > 0.0
+          ? 1000.0 * static_cast<double>(message.payload_bytes) /
+                model.bandwidth_bytes_per_sec
+          : 0.0;
+  const double txStartMs =
+      std::max(message.send_time_ms, link->second.next_available_ms);
+  const double txFinishMs = txStartMs + txMs;
+  const double deliveryMs = txFinishMs + latency;
+  link->second.next_available_ms = txFinishMs;
+
+  PendingEvent event;
+  event.delivered.message = std::move(message);
+  event.delivered.delivery_time_ms = deliveryMs;
+  event.insertion_order = next_insertion_order_++;
+  pending_.push_back(std::move(event));
+}
+
+std::vector<RIFTDeliveredNetworkMessage>
+RIFTP2PNetworkSimulator::DeliverReady(double now_ms) {
+  std::vector<PendingEvent> remaining;
+  std::vector<RIFTDeliveredNetworkMessage> delivered;
+  remaining.reserve(pending_.size());
+  for (const auto &event : pending_) {
+    const auto &message = event.delivered.message;
+    if (event.delivered.delivery_time_ms <= now_ms &&
+        LinkUp(message.src_robot, message.dst_robot)) {
+      delivered.push_back(event.delivered);
+    } else {
+      remaining.push_back(event);
+    }
+  }
+  pending_ = std::move(remaining);
+  std::sort(delivered.begin(), delivered.end(),
+            [](const RIFTDeliveredNetworkMessage &lhs,
+               const RIFTDeliveredNetworkMessage &rhs) {
+              if (lhs.delivery_time_ms != rhs.delivery_time_ms) {
+                return lhs.delivery_time_ms < rhs.delivery_time_ms;
+              }
+              return lhs.message.seq < rhs.message.seq;
+            });
+  return delivered;
+}
+
+std::size_t RIFTP2PNetworkSimulator::PendingCount() const {
+  return pending_.size();
+}
+
+std::size_t RIFTP2PNetworkSimulator::DroppedCount() const {
+  return dropped_count_;
+}
+
 Matrix RIFTExactSolver::SolveMatrix(const InterfaceProblem &problem,
                                     const InterfaceCliqueTree &tree,
                                     const RIFTParams &params,

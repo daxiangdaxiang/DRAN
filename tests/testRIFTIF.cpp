@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <set>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -98,6 +99,21 @@ std::size_t estimatedTreeBytes(const InterfaceCliqueTree &tree) {
     bytes += 2u * edge.estimated_message_bytes;
   }
   return bytes;
+}
+
+RIFTNetworkMessage makeNetworkMessage(int src, int dst, std::uint64_t seq,
+                                      double sendTimeMs,
+                                      std::size_t payloadBytes = 16) {
+  RIFTNetworkMessage message;
+  message.src_robot = src;
+  message.dst_robot = dst;
+  message.seq = seq;
+  message.payload_bytes = payloadBytes;
+  message.send_time_ms = sendTimeMs;
+  message.rift_message.header.src = src;
+  message.rift_message.header.dst = dst;
+  message.rift_message.header.seq = seq;
+  return message;
 }
 
 RelativeSEMeasurement makeMeasurement(size_t i, size_t j,
@@ -396,6 +412,162 @@ TEST(testDPGO, RIFTIFRootlessSchedulerCompletesAllDirectedMessages) {
   EXPECT_TRUE(scheduler.CliqueBeliefReady(0));
   EXPECT_TRUE(scheduler.CliqueBeliefReady(1));
   EXPECT_TRUE(scheduler.CliqueBeliefReady(2));
+}
+
+TEST(testDPGO, RIFTIFNetworkZeroDelayMatchesRootlessSchedulerOrdering) {
+  InterfaceCliqueTree tree;
+  tree.cliques.resize(3);
+  for (int i = 0; i < 3; ++i) {
+    tree.cliques[i].id = i;
+  }
+  tree.cliques[0].neighbors = {1};
+  tree.cliques[1].neighbors = {0, 2};
+  tree.cliques[2].neighbors = {1};
+
+  std::vector<DirectedCliqueEdge> directOrder;
+  RIFTRootlessScheduler directScheduler;
+  directScheduler.Initialize(tree);
+  while (!directScheduler.AllDirectedMessagesComplete()) {
+    const auto ready = directScheduler.ReadyOutgoingMessages();
+    ASSERT_FALSE(ready.empty());
+    for (const auto &edge : ready) {
+      RIFTMessage msg;
+      msg.header.src = edge.src;
+      msg.header.dst = edge.dst;
+      directOrder.push_back(edge);
+      directScheduler.MarkMessageSent(edge.src, edge.dst);
+      directScheduler.OnMessageReceived(msg);
+    }
+  }
+
+  RIFTP2PNetworkSimulator network;
+  RIFTLinkModel zeroDelay;
+  network.AddLink(0, 1, zeroDelay);
+  network.AddLink(1, 2, zeroDelay);
+  RIFTRootlessScheduler networkScheduler;
+  networkScheduler.Initialize(tree);
+  std::uint64_t seq = 0;
+  std::vector<DirectedCliqueEdge> networkOrder;
+  while (!networkScheduler.AllDirectedMessagesComplete()) {
+    const auto ready = networkScheduler.ReadyOutgoingMessages();
+    ASSERT_FALSE(ready.empty());
+    for (const auto &edge : ready) {
+      networkScheduler.MarkMessageSent(edge.src, edge.dst);
+      network.Send(makeNetworkMessage(edge.src, edge.dst, seq++, 0.0));
+    }
+    const auto delivered = network.DeliverReady(0.0);
+    ASSERT_FALSE(delivered.empty());
+    for (const auto &event : delivered) {
+      networkOrder.push_back(
+          DirectedCliqueEdge{event.message.rift_message.header.src,
+                             event.message.rift_message.header.dst});
+      networkScheduler.OnMessageReceived(event.message.rift_message);
+    }
+  }
+
+  ASSERT_EQ(networkOrder.size(), directOrder.size());
+  for (std::size_t i = 0; i < directOrder.size(); ++i) {
+    EXPECT_EQ(networkOrder[i].src, directOrder[i].src);
+    EXPECT_EQ(networkOrder[i].dst, directOrder[i].dst);
+  }
+}
+
+TEST(testDPGO, RIFTIFNetworkDelayedReorderedDeliveryCompletesScheduler) {
+  InterfaceCliqueTree tree;
+  tree.cliques.resize(3);
+  for (int i = 0; i < 3; ++i) {
+    tree.cliques[i].id = i;
+  }
+  tree.cliques[0].neighbors = {1};
+  tree.cliques[1].neighbors = {0, 2};
+  tree.cliques[2].neighbors = {1};
+
+  RIFTLinkModel model;
+  model.latency_mean_ms = 5.0;
+  model.latency_jitter_ms = 2.0;
+  model.reorder_prob = 1.0;
+  RIFTP2PNetworkSimulator network(7);
+  network.AddLink(0, 1, model);
+  network.AddLink(1, 2, model);
+
+  RIFTRootlessScheduler scheduler;
+  scheduler.Initialize(tree);
+  std::uint64_t seq = 0;
+  double now = 0.0;
+  std::set<std::pair<int, int>> receivedEdges;
+  for (int step = 0; step < 100 && !scheduler.AllDirectedMessagesComplete();
+       ++step) {
+    const auto ready = scheduler.ReadyOutgoingMessages();
+    for (const auto &edge : ready) {
+      scheduler.MarkMessageSent(edge.src, edge.dst);
+      network.Send(makeNetworkMessage(edge.src, edge.dst, seq++, now, 32));
+    }
+    now += 2.0;
+    for (const auto &event : network.DeliverReady(now)) {
+      receivedEdges.insert({event.message.rift_message.header.src,
+                            event.message.rift_message.header.dst});
+      scheduler.OnMessageReceived(event.message.rift_message);
+    }
+  }
+
+  EXPECT_TRUE(scheduler.AllDirectedMessagesComplete());
+  EXPECT_EQ(receivedEdges.size(), 4u);
+}
+
+TEST(testDPGO, RIFTIFNetworkSerializesBandwidthPerDirectedLink) {
+  RIFTP2PNetworkSimulator network;
+  RIFTLinkModel model;
+  model.bandwidth_bytes_per_sec = 1000.0;
+  network.AddLink(0, 1, model);
+
+  network.Send(makeNetworkMessage(0, 1, 1, 0.0, 1000));
+  network.Send(makeNetworkMessage(0, 1, 2, 0.0, 500));
+  EXPECT_TRUE(network.DeliverReady(999.0).empty());
+
+  const auto first = network.DeliverReady(1000.0);
+  ASSERT_EQ(first.size(), 1u);
+  EXPECT_EQ(first[0].message.seq, 1u);
+  EXPECT_DOUBLE_EQ(first[0].delivery_time_ms, 1000.0);
+
+  const auto second = network.DeliverReady(1500.0);
+  ASSERT_EQ(second.size(), 1u);
+  EXPECT_EQ(second[0].message.seq, 2u);
+  EXPECT_DOUBLE_EQ(second[0].delivery_time_ms, 1500.0);
+}
+
+TEST(testDPGO, RIFTIFNetworkDisconnectHoldAndDropPolicies) {
+  RIFTP2PNetworkSimulator holdingNetwork;
+  RIFTLinkModel holdModel;
+  holdModel.latency_mean_ms = 10.0;
+  holdingNetwork.AddLink(0, 1, holdModel);
+  holdingNetwork.DropLink(0, 1);
+  holdingNetwork.Send(makeNetworkMessage(0, 1, 1, 0.0));
+  EXPECT_TRUE(holdingNetwork.DeliverReady(100.0).empty());
+  EXPECT_EQ(holdingNetwork.PendingCount(), 1u);
+  holdingNetwork.RestoreLink(0, 1);
+  const auto deliveredAfterRestore = holdingNetwork.DeliverReady(100.0);
+  ASSERT_EQ(deliveredAfterRestore.size(), 1u);
+  EXPECT_EQ(deliveredAfterRestore[0].message.seq, 1u);
+
+  RIFTP2PNetworkSimulator droppingNetwork;
+  RIFTLinkModel dropWhileDisconnected;
+  dropWhileDisconnected.disconnect_policy =
+      RIFTDisconnectPolicy::DROP_WHILE_DISCONNECTED;
+  droppingNetwork.AddLink(0, 1, dropWhileDisconnected);
+  droppingNetwork.DropLink(0, 1);
+  droppingNetwork.Send(makeNetworkMessage(0, 1, 2, 0.0));
+  EXPECT_EQ(droppingNetwork.PendingCount(), 0u);
+  EXPECT_EQ(droppingNetwork.DroppedCount(), 1u);
+}
+
+TEST(testDPGO, RIFTIFNetworkDropProbabilityCanDropDeterministically) {
+  RIFTP2PNetworkSimulator network;
+  RIFTLinkModel model;
+  model.drop_prob = 1.0;
+  network.AddLink(0, 1, model);
+  network.Send(makeNetworkMessage(0, 1, 1, 0.0));
+  EXPECT_EQ(network.PendingCount(), 0u);
+  EXPECT_EQ(network.DroppedCount(), 1u);
 }
 
 TEST(testDPGO, RIFTIFExactMatchesDirectOracleOnSmallInterface) {
